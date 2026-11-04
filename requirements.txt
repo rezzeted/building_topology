@@ -1,0 +1,4 @@
+ortools==9.15.6755
+numpy==2.5.4
+cairosvg==2.9.1
+cairocffi==1.7.1
