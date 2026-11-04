@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "floors": 2,
+  "house_area_m2": 61.52,
+  "rooms": [
+    {
+      "id": "hall",
+      "name": "Прихожая",
+      "kind": "corridor",
+      "floor": 1,
+      "area_m2": 6.0,
+      "windows": [],
+      "exterior_doors": [
+        { "facade": "east", "width_mm": 1000, "entrance": true }
+      ]
+    },
+    {
+      "id": "living",
+      "name": "Гостиная",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 16.0,
+      "windows": [
+        { "count": 1, "width_mm": 1200, "facade": "north" }
+      ]
+    },
+    {
+      "id": "kitchen",
+      "name": "Кухня",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 10.0,
+      "windows": [
+        { "count": 1, "width_mm": 1200, "facade": "south" }
+      ]
+    },
+    {
+      "id": "stair1",
+      "name": "Лестница",
+      "kind": "stair",
+      "floor": 1,
+      "area_m2": 5.76,
+      "windows": []
+    },
+    {
+      "id": "hall2",
+      "name": "Холл",
+      "kind": "corridor",
+      "floor": 2,
+      "area_m2": 4.0,
+      "windows": []
+    },
+    {
+      "id": "bed",
+      "name": "Спальня",
+      "kind": "room",
+      "floor": 2,
+      "area_m2": 14.0,
+      "windows": [
+        { "count": 1, "width_mm": 1200, "facade": "north" }
+      ]
+    },
+    {
+      "id": "stair2",
+      "name": "Лестница",
+      "kind": "stair",
+      "floor": 2,
+      "area_m2": 5.76,
+      "windows": []
+    }
+  ],
+  "doors": [
+    { "a": "hall", "b": "living" },
+    { "a": "hall", "b": "kitchen" },
+    { "a": "hall", "b": "stair1" },
+    { "a": "hall2", "b": "bed" },
+    { "a": "hall2", "b": "stair2" }
+  ],
+  "stairs": [
+    {
+      "id": "stair_main",
+      "from_floor": 1,
+      "to_floor": 2,
+      "width_mm": 2400,
+      "depth_mm": 2400,
+      "rooms": ["stair1", "stair2"]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "floors": 1,
+  "house_area_m2": 44.0,
+  "rooms": [
+    {
+      "id": "kitchen_living",
+      "name": "Кухня-гостиная",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 22.0,
+      "windows": [
+        { "count": 1, "facade": "east" },
+        { "count": 1, "facade": "south" }
+      ]
+    },
+    {
+      "id": "hall",
+      "name": "Прихожая",
+      "kind": "corridor",
+      "floor": 1,
+      "area_m2": 5.0,
+      "windows": [],
+      "exterior_doors": [
+        { "facade": "east", "entrance": true }
+      ]
+    },
+    {
+      "id": "bath",
+      "name": "Ванная",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 5.0,
+      "windows": [
+        { "count": 1, "width_mm": 600 }
+      ]
+    },
+    {
+      "id": "bedroom",
+      "name": "Спальня",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 11.5,
+      "windows": [
+        { "count": 1, "facade": "west" }
+      ]
+    }
+  ],
+  "doors": [
+    { "a": "hall", "b": "kitchen_living" },
+    { "a": "hall", "b": "bath" },
+    { "a": "hall", "b": "bedroom" }
+  ],
+  "stairs": []
+}

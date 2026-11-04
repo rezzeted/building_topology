@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "floors": 1,
+  "house_area_m2": 32.0,
+  "rooms": [
+    {
+      "id": "hall",
+      "name": "Прихожая",
+      "kind": "corridor",
+      "floor": 1,
+      "area_m2": 5.0,
+      "windows": [],
+      "exterior_doors": [
+        { "facade": "south", "entrance": true }
+      ]
+    },
+    {
+      "id": "bath",
+      "name": "Санузел",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 5.0,
+      "windows": []
+    },
+    {
+      "id": "studio",
+      "name": "Студия",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 22.0,
+      "windows": [
+        { "count": 2, "facade": "south" },
+        { "count": 1, "facade": "east" }
+      ]
+    }
+  ],
+  "doors": [
+    { "a": "hall", "b": "bath" },
+    { "a": "hall", "b": "studio" }
+  ],
+  "stairs": []
+}

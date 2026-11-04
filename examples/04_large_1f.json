@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "floors": 1,
+  "house_area_m2": 156.0,
+  "rooms": [
+    {
+      "id": "bed2",
+      "name": "Спальня 2",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 16.0,
+      "windows": [
+        { "count": 1, "facade": "south" },
+        { "count": 1, "facade": "west" }
+      ]
+    },
+    {
+      "id": "laundry",
+      "name": "Постирочная",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 5.5,
+      "windows": [
+        { "count": 1, "width_mm": 600, "facade": "south" }
+      ]
+    },
+    {
+      "id": "bath",
+      "name": "Ванная",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 5.5,
+      "windows": []
+    },
+    {
+      "id": "hall",
+      "name": "Прихожая",
+      "kind": "corridor",
+      "floor": 1,
+      "area_m2": 11.0,
+      "windows": [],
+      "exterior_doors": [
+        { "facade": "south", "width_mm": 1200, "entrance": true }
+      ]
+    },
+    {
+      "id": "office",
+      "name": "Кабинет",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 11.0,
+      "windows": [
+        { "count": 1, "facade": "south" }
+      ]
+    },
+    {
+      "id": "living",
+      "name": "Гостиная",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 35.5,
+      "windows": [
+        { "count": 2, "facade": "south" },
+        { "count": 1, "facade": "east" }
+      ],
+      "exterior_doors": [
+        { "facade": "east", "width_mm": 1500, "entrance": false }
+      ]
+    },
+    {
+      "id": "corridor",
+      "name": "Коридор",
+      "kind": "corridor",
+      "floor": 1,
+      "area_m2": 8.5,
+      "windows": []
+    },
+    {
+      "id": "gallery",
+      "name": "Холл",
+      "kind": "corridor",
+      "floor": 1,
+      "area_m2": 7.0,
+      "windows": []
+    },
+    {
+      "id": "bed1",
+      "name": "Спальня 1",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 15.5,
+      "windows": [
+        { "count": 1, "facade": "north" },
+        { "count": 1, "facade": "west" }
+      ]
+    },
+    {
+      "id": "bath1",
+      "name": "Санузел 1",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 6.5,
+      "windows": [
+        { "count": 1, "width_mm": 600, "facade": "north" }
+      ]
+    },
+    {
+      "id": "bed3",
+      "name": "Спальня 3",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 8.0,
+      "windows": [
+        { "count": 1, "facade": "north" }
+      ]
+    },
+    {
+      "id": "bath2",
+      "name": "Санузел 2",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 6.5,
+      "windows": [
+        { "count": 1, "width_mm": 600 }
+      ]
+    },
+    {
+      "id": "kitchen",
+      "name": "Кухня",
+      "kind": "room",
+      "floor": 1,
+      "area_m2": 20.0,
+      "windows": [
+        { "count": 2 },
+        { "count": 1, "facade": "east" }
+      ]
+    }
+  ],
+  "doors": [
+    { "a": "hall", "b": "laundry" },
+    { "a": "hall", "b": "gallery" },
+    { "a": "gallery", "b": "corridor" },
+    { "a": "gallery", "b": "office" },
+    { "a": "gallery", "b": "living" },
+    { "a": "gallery", "b": "bed3" },
+    { "a": "gallery", "b": "bath2" },
+    { "a": "corridor", "b": "bed2" },
+    { "a": "corridor", "b": "bath" },
+    { "a": "corridor", "b": "bed1" },
+    { "a": "bed1", "b": "bath1" },
+    { "a": "living", "b": "kitchen" }
+  ],
+  "stairs": []
+}
