@@ -46,10 +46,37 @@ class Room:
     exterior_doors: list[ExteriorDoor]
     shapes: list[tuple[int, int]] = field(default_factory=list)
     shaft: str | None = None
+    use: str = "other"
 
     @property
     def opening_length(self) -> int:
         return sum(g.count * g.width for g in self.windows) + sum(d.width for d in self.exterior_doors)
+
+    @property
+    def window_count(self) -> int:
+        return sum(g.count for g in self.windows)
+
+
+@dataclass(frozen=True)
+class Heater:
+    id: str
+    kind: str
+    room: str
+    floor: int
+    flue: str
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """Ширина вдоль стены за спиной отопителя и глубина в комнату."""
+        return C.HEATER_SIZE[self.kind]
+
+    @property
+    def front(self) -> int:
+        return C.FRONT_ZONE.get(self.kind, 0)
+
+    @property
+    def gas(self) -> bool:
+        return self.kind in C.GAS_KINDS
 
 
 @dataclass
@@ -72,6 +99,7 @@ class Building:
     allow_beams: bool = False
     beam_span: int = C.BEAM_SPAN_DEFAULT
     room_tolerance: int = C.AREA_TOLERANCE_PCT
+    heaters: list[Heater] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.by_id = {r.id: r for r in self.rooms}
@@ -81,6 +109,13 @@ class Building:
 
     def floor_rooms(self, floor: int) -> list[Room]:
         return [r for r in self.rooms if r.floor == floor]
+
+    def room_heaters(self, room_id: str) -> list[Heater]:
+        return [h for h in self.heaters if h.room == room_id]
+
+    def gas_room(self, room_id: str) -> bool:
+        """В комнате стоит газовый прибор: дверь из неё открывается наружу (СП 402, п. 5.11)."""
+        return any(h.gas for h in self.room_heaters(room_id))
 
     @property
     def entrance_room(self) -> Room:
@@ -181,7 +216,7 @@ def _list(value, where: str) -> list:
 
 def _parse_schema(data) -> Building:
     top = _fields(data, "вход", {"version", "floors", "house_area_m2", "rooms"},
-                  {"doors", "stairs", "structure", "room_area_tolerance_pct"})
+                  {"doors", "stairs", "structure", "room_area_tolerance_pct", "heaters"})
     if _int(top["version"], "version") != 1:
         raise InputError(f"version: поддерживается только 1, получено {top['version']}")
     floors = _int(top["floors"], "floors", 1, C.MAX_FLOORS)
@@ -195,7 +230,7 @@ def _parse_schema(data) -> Building:
     rooms = []
     for i, raw in enumerate(raw_rooms):
         where = f"rooms[{i}]"
-        r = _fields(raw, where, {"id", "kind", "floor", "area_m2"}, {"name", "windows", "exterior_doors"})
+        r = _fields(raw, where, {"id", "kind", "floor", "area_m2"}, {"name", "use", "windows", "exterior_doors"})
         rid = _identifier(r["id"], f"{where}.id")
         where = f"комната {rid}"
         if rid in ids:
@@ -209,6 +244,11 @@ def _parse_schema(data) -> Building:
             raise InputError(f"{where}: kind {kind!r} не из {', '.join(C.KINDS)}")
         floor = _int(r["floor"], f"{where}.floor", 1, floors)
         target = _area(r["area_m2"], f"{where}.area_m2")
+        use = r.get("use", "other")
+        if use not in C.USES:
+            raise InputError(f"{where}: use {use!r} не из {', '.join(C.USES)}")
+        if kind == "stair" and "use" in r:
+            raise InputError(f"{where}: у лестничной комнаты use не задаётся")
 
         windows = []
         for j, g in enumerate(_list(r.get("windows", []), f"{where}.windows")):
@@ -232,7 +272,7 @@ def _parse_schema(data) -> Building:
                 raise InputError(f"{dw}.entrance: ожидается true или false")
             ext_doors.append(ExteriorDoor(facade, width, entrance))
 
-        rooms.append(Room(rid, name, kind, floor, target, windows, ext_doors))
+        rooms.append(Room(rid, name, kind, floor, target, windows, ext_doors, use=use))
 
     by_id = {r.id: r for r in rooms}
     doors = []
@@ -280,7 +320,26 @@ def _parse_schema(data) -> Building:
     tolerance = _int(top.get("room_area_tolerance_pct", C.AREA_TOLERANCE_PCT), "room_area_tolerance_pct",
                      1, C.ROOM_TOLERANCE_MAX_PCT)
 
-    return Building(floors, house_area, rooms, doors, shafts, beams, span, tolerance)
+    heaters = []
+    for i, raw in enumerate(_list(top.get("heaters", []), "heaters")):
+        where = f"heaters[{i}]"
+        h = _fields(raw, where, {"id", "kind", "room"}, {"flue"})
+        hid = _identifier(h["id"], f"{where}.id")
+        where = f"отопитель {hid}"
+        if hid in ids or hid in shaft_ids or any(o.id == hid for o in heaters):
+            raise InputError(f"{where}: идентификатор повторяется")
+        kind = h["kind"]
+        if kind not in C.HEATER_KINDS:
+            raise InputError(f"{where}: kind {kind!r} не из {', '.join(C.HEATER_KINDS)}")
+        room = by_id.get(h["room"])
+        if room is None:
+            raise InputError(f"{where}: нет комнаты {h['room']!r}")
+        flue = h.get("flue", C.FLUES[kind][0])
+        if flue not in C.FLUES[kind]:
+            raise InputError(f"{where}: flue {flue!r} для {kind} не из {', '.join(C.FLUES[kind])}")
+        heaters.append(Heater(hid, kind, room.id, room.floor, flue))
+
+    return Building(floors, house_area, rooms, doors, shafts, beams, span, tolerance, heaters)
 
 
 def _check_semantics(b: Building) -> None:
@@ -377,3 +436,81 @@ def _check_semantics(b: Building) -> None:
     lost = [r.id for r in b.rooms if r.id not in seen]
     if lost:
         raise InputError(f"комната {lost[0]} не достижима от входа ({start}) по дверям и лестницам")
+
+    _check_heaters(b)
+
+
+def heater_fits(heater: Heater, w: int, h: int) -> bool:
+    """Отопитель с зоной перед ним помещается в комнату w×h спиной к одной из стен."""
+    along, depth = heater.size
+    if heater.kind == "gas_convector":
+        along += 2 * C.CONVECTOR_SIDE_GAP
+    depth += heater.front
+    return w >= along and h >= depth or h >= along and w >= depth
+
+
+def _check_heaters(b: Building) -> None:
+    # 5.10–5.14
+    for h in b.heaters:
+        r = b.room(h.room)
+        where = f"отопитель {h.id}"
+        if r.kind == "stair":
+            raise InputError(f"{where}: в лестничной комнате {r.id} отопитель не ставится")
+        if h.kind in ("gas_boiler", "solid_boiler") and r.floor != 1:
+            raise InputError(f"{where}: котёл ставится на этаже 1 (СП 55.13330.2016, п. 7.13)")
+        if h.kind == "gas_boiler":
+            if r.use not in ("kitchen", "boiler_room"):
+                raise InputError(f"{where}: газовый котёл ставится в кухне или котельной, а у комнаты {r.id} "
+                                 f"use = {r.use} (СП 402.1325800.2018, п. 5.5)")
+            if b.floors > C.COAXIAL_MAX_FLOORS:
+                raise InputError(f"{where}: выход через стену допустим в доме не выше {C.COAXIAL_MAX_FLOORS} этажей "
+                                 f"(СП 402.1325800.2018, п. Г.16)")
+            if not r.windows:
+                raise InputError(f"{where}: в комнате {r.id} с газовым котлом нужно окно (СП 402.1325800.2018, п. 5.10)")
+        if h.kind == "solid_boiler" and r.use != "boiler_room":
+            raise InputError(f"{where}: твердотопливный котёл ставится в котельной (use = boiler_room), "
+                             f"а у комнаты {r.id} use = {r.use}")
+        if h.kind == "gas_convector":
+            if b.floors > C.CONVECTOR_MAX_FLOORS:
+                raise InputError(f"{where}: газовые конвекторы допустимы в доме не выше {C.CONVECTOR_MAX_FLOORS} "
+                                 f"этажей (СП 402.1325800.2018, п. Е.1)")
+            if r.use in ("vestibule", "bath", "wc"):
+                raise InputError(f"{where}: конвектор не ставится в тамбуре, туалете и ванной, а у комнаты {r.id} "
+                                 f"use = {r.use} (СП 402.1325800.2018, п. Е.1)")
+        if not any(heater_fits(h, w, d) for w, d in r.shapes):
+            raise InputError(f"{where}: ни в один допустимый прямоугольник комнаты {r.id} не помещается отопитель "
+                             f"{h.size[0] * C.UNIT_MM}×{h.size[1] * C.UNIT_MM} мм с зоной "
+                             f"{h.front * C.UNIT_MM} мм перед ним")
+
+    # Прямоугольники комнаты с отопителями сужаются до тех, где выполнены правила отопителей.
+    for r in b.rooms:
+        heaters = b.room_heaters(r.id)
+        if not heaters:
+            continue
+        if sum(h.kind == "gas_boiler" for h in heaters) > C.BOILERS_PER_ROOM:
+            raise InputError(f"комната {r.id}: больше {C.BOILERS_PER_ROOM} газовых котлов "
+                             f"(СП 402.1325800.2018, п. 5.7)")
+        shapes = [s for s in r.shapes if all(heater_fits(h, *s) for h in heaters)]
+        if not shapes:
+            raise InputError(f"комната {r.id}: ни в один допустимый прямоугольник не помещаются все её отопители "
+                             f"с зонами перед ними")
+        convectors = sum(h.kind == "gas_convector" for h in heaters)
+        if convectors:
+            if convectors > r.window_count:
+                raise InputError(f"комната {r.id}: конвекторов {convectors}, окон {r.window_count}; каждый конвектор "
+                                 f"стоит под своим окном (СП 402.1325800.2018, п. Е.3)")
+            shapes = [(w, d) for w, d in shapes if w * d >= C.CONVECTOR_ROOM_MIN]
+            if not shapes:
+                raise InputError(f"комната {r.id}: с конвектором площадь не меньше "
+                                 f"{C.CONVECTOR_ROOM_MIN * C.CELL_M2:g} м² (СП 402.1325800.2018, п. Е.1)")
+            if convectors < 2:
+                shapes = [(w, d) for w, d in shapes if w * d < C.CONVECTOR_PAIR_AREA]
+                if not shapes:
+                    raise InputError(f"комната {r.id}: при площади от {C.CONVECTOR_PAIR_AREA * C.CELL_M2:g} м² нужно "
+                                     f"не меньше двух конвекторов (СП 402.1325800.2018, п. Е.2)")
+        r.shapes = shapes
+
+    for a, c in b.doors:
+        if b.gas_room(a) and b.gas_room(c):
+            raise InputError(f"дверь {a}–{c}: в обеих комнатах газовые приборы, а дверь из такой комнаты "
+                             f"открывается наружу (СП 402.1325800.2018, п. 5.11)")

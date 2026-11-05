@@ -15,19 +15,23 @@
 Отклонения площадей минимизируются по этажам снизу вверх: нижний этаж получает лучшие площади,
 верхние подстраиваются под него. Все этажи остаются в одной модели, поэтому выбор нижнего этажа
 не лишает верхние допустимого плана.
+
+Отопители и дымовые трубы — прямоугольники внутри комнат, площадь комнат они не меняют. Труба
+стоит на одном месте на всех этажах, которые проходит. Двери, окна, зоны перед отопителями и
+коаксиальные выходы ставятся в той же модели, чтобы план с отопителями находился сразу целиком.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from ortools.sat.python import cp_model
 
 from . import constants as C
-from .problem import Building, Room
+from .problem import Building, Heater, Room
 
 GRID_EXTRA = 4
 GRID_MAX = 16
@@ -84,6 +88,11 @@ class Plan:
     placements: list[Placement]
     strips: dict[int, list[tuple[int, int, int, int]]] = field(default_factory=dict)
     stats: dict = field(default_factory=dict)
+    # Отопитель: левый нижний угол и сторона стены за спиной.
+    heaters: dict[str, tuple[int, int, str]] = field(default_factory=dict)
+    # Труба: прямоугольник и верхний этаж, сквозь который она проходит.
+    chimneys: dict[str, tuple[int, int, int, int, int]] = field(default_factory=dict)
+    doors: dict[tuple[str, str], int] = field(default_factory=dict)
 
 
 @dataclass
@@ -118,6 +127,19 @@ class OpeningVars:
     on_facade: dict[str, cp_model.IntVar]
 
 
+@dataclass
+class HeaterVars:
+    heater: Heater
+    x: cp_model.IntVar
+    y: cp_model.IntVar
+    back: dict[str, cp_model.IntVar]
+    horiz: cp_model.IntVar
+    along: cp_model.IntVar
+    chimney: tuple | None = None
+    through: dict[int, cp_model.IntVar] = field(default_factory=dict)
+    windows: dict[int, cp_model.IntVar] = field(default_factory=dict)
+
+
 def openings_of(room: Room) -> list[Opening]:
     out = [Opening(room.id, "door", d.width, d.facade, d.entrance) for d in room.exterior_doors]
     for g in room.windows:
@@ -126,16 +148,21 @@ def openings_of(room: Room) -> list[Opening]:
 
 
 class PlanModel:
-    def __init__(self, building: Building, rectangular: bool = False, support: bool | None = None):
+    def __init__(self, building: Building, rectangular: bool = False, support: bool | None = None,
+                 heaters: bool = True):
         self.b = building
         self.rectangular = rectangular
         self.support = (not building.allow_beams if support is None else support) and building.floors > 1
+        self.with_heaters = heaters and bool(building.heaters)
         self.frames: dict[int, tuple] = {}
         self.frame_spans: dict[int, tuple[Span, Span]] = {}
         self.m = cp_model.CpModel()
         self.size = self._size_bound()
         self.rooms: dict[str, RoomVars] = {}
         self.openings: list[OpeningVars] = []
+        self.heaters: dict[str, HeaterVars] = {}
+        self.door_rel: dict[tuple[str, str], list] = {}
+        self.door_at: dict[tuple[str, str], cp_model.IntVar] = {}
         self._access: dict[tuple, cp_model.IntVar] = {}
         self._add_grid()
         self._add_rooms()
@@ -145,6 +172,8 @@ class PlanModel:
         self._add_floor_connectivity()
         self._add_openings()
         self._add_house_area()
+        if self.with_heaters:
+            self._add_heaters()
         self._add_objectives()
 
     def _size_bound(self) -> int:
@@ -452,6 +481,8 @@ class PlanModel:
             floor = self.b.room(a).floor
             rel = self._share_wall(self.rooms[a], self.rooms[c], DOOR_SPAN, f"door_{a}_{c}", floor)
             self.m.add_exactly_one(rel)
+            gaps = (0, STRIP) if floor in self.strip else (0,)
+            self.door_rel[(a, c)] = list(zip(rel, [(side, gap) for gap in gaps for side in "wesn"]))
 
     def _add_floor_connectivity(self) -> None:
         """Если двери этажа не связывают его комнаты, компоненты обязаны соприкасаться стенами."""
@@ -589,6 +620,377 @@ class PlanModel:
         hi = target * (100 + C.AREA_TOLERANCE_PCT) // 100
         self.m.add_linear_constraint(total, lo, hi)
 
+    def _add_heaters(self) -> None:
+        """Отопители, трубы и выходы (раздел 7 ТЗ, п. 16–25).
+
+        Сплошное — корпус отопителя и труба на этаже, через который она проходит. Сплошные прямоугольники
+        одного этажа не пересекаются. В них не заходят зона перед отопителем, зона двери и полоса 100 мм
+        за окном внутри комнаты; эти зоны между собой пересекаться могут.
+        """
+        m = self.m
+        solids: dict[int, list] = defaultdict(list)
+        low: dict[int, list] = defaultdict(list)
+        free: dict[int, list[list]] = defaultdict(list)
+        for h in self.b.heaters:
+            hv = self._heater(h, free)
+            self.heaters[h.id] = hv
+            boxes = self._oriented(hv, hv.x, hv.y, *h.size)
+            solids[h.floor] += boxes
+            if h.kind != "gas_convector":
+                low[h.floor] += boxes
+            if h.flue == "chimney":
+                for floor, (inside, _) in self._chimney_through(hv).items():
+                    solids[floor] += inside
+                    low[floor] += inside
+            elif h.flue == "facade":
+                self._facade_chimney(hv)
+        self._add_outlets()
+        for floor, boxes in solids.items():
+            m.add_no_overlap_2d([b[0] for b in boxes], [b[1] for b in boxes])
+            wins = self._window_bands(floor)
+            if wins:
+                m.add_no_overlap_2d([b[0] for b in wins + low[floor]], [b[1] for b in wins + low[floor]])
+            zones = free[floor] + self._door_zones(floor)
+            for zone in zones:
+                m.add_no_overlap_2d([b[0] for b in zone + boxes], [b[1] for b in zone + boxes])
+
+    def _heater(self, h: Heater, free: dict[int, list[list]]) -> HeaterVars:
+        """Корпус отопителя спиной к одной из стен своей комнаты и зона перед ним."""
+        m, d = self.m, self.size
+        rv, r = self.rooms[h.room], self.b.room(h.room)
+        along_size, depth = h.size
+        x, y = m.new_int_var(0, d, f"{h.id}_x"), m.new_int_var(0, d, f"{h.id}_y")
+        back = {f: m.new_bool_var(f"{h.id}_back_{f}") for f in C.FACADES}
+        m.add_exactly_one(back.values())
+        horiz = m.new_bool_var(f"{h.id}_horiz")
+        m.add(horiz == back["north"] + back["south"])
+        along = m.new_int_var(0, d, f"{h.id}_along")
+        m.add(along == x).only_enforce_if(horiz)
+        m.add(along == y).only_enforce_if(~horiz)
+        w = depth + (along_size - depth) * horiz
+        hh = along_size + (depth - along_size) * horiz
+        m.add(x >= rv.x)
+        m.add(y >= rv.y)
+        m.add(x + w <= rv.x + rv.w)
+        m.add(y + hh <= rv.y + rv.h)
+        m.add(y + depth == rv.y + rv.h).only_enforce_if(back["north"])
+        m.add(y == rv.y).only_enforce_if(back["south"])
+        m.add(x + depth == rv.x + rv.w).only_enforce_if(back["east"])
+        m.add(x == rv.x).only_enforce_if(back["west"])
+        hv = HeaterVars(h, x, y, back, horiz, along)
+
+        if h.front:
+            m.add(rv.h >= depth + h.front).only_enforce_if(horiz)
+            m.add(rv.w >= depth + h.front).only_enforce_if(~horiz)
+            starts = {"north": (x, y - h.front), "south": (x, y + depth),
+                      "east": (x - h.front, y), "west": (x + depth, y)}
+            zone = []
+            for facade, (zx, zy) in starts.items():
+                sx, sy = (along_size, h.front) if facade in HORIZONTAL else (h.front, along_size)
+                zone.append(self._box(zx, sx, zy, sy, back[facade], f"{h.id}_front_{facade}"))
+            free[h.floor].append(zone)
+        if h.kind == "gas_convector":
+            gap = C.CONVECTOR_SIDE_GAP
+            m.add(along >= rv.x + gap).only_enforce_if(horiz)
+            m.add(along + along_size <= rv.x + rv.w - gap).only_enforce_if(horiz)
+            m.add(along >= rv.y + gap).only_enforce_if(~horiz)
+            m.add(along + along_size <= rv.y + rv.h - gap).only_enforce_if(~horiz)
+            self._under_window(hv)
+        if h.flue == "chimney":
+            self._interior_back(hv)
+        else:
+            self._exterior_back(hv, r)
+        return hv
+
+    @staticmethod
+    def _top(rv: RoomVars):
+        """Северная внутренняя грань комнаты как аффинное выражение: начало интервала не может быть суммой переменных."""
+        return rv.y_end - C.INTERIOR_WALL
+
+    @staticmethod
+    def _right(rv: RoomVars):
+        return rv.x_end - C.INTERIOR_WALL
+
+    def _box(self, x, sx: int, y, sy: int, present, name: str) -> tuple:
+        m = self.m
+        return (m.new_optional_fixed_size_interval_var(x, sx, present, f"{name}_bx"),
+                m.new_optional_fixed_size_interval_var(y, sy, present, f"{name}_by"))
+
+    def _oriented(self, hv: HeaterVars, x, y, along_size: int, depth: int, present=None) -> list[tuple]:
+        """Прямоугольник along_size × depth, развёрнутый вдоль стены за спиной отопителя."""
+        m = self.m
+        name = f"{hv.heater.id}_box{len(m.proto.variables)}"
+        lits = (hv.horiz, ~hv.horiz)
+        if present is not None:
+            lits = (m.new_bool_var(f"{name}_h"), m.new_bool_var(f"{name}_v"))
+            m.add(lits[0] + lits[1] == present)
+            m.add(lits[0] <= hv.horiz)
+            m.add(lits[1] + hv.horiz <= 1)
+        return [self._box(x, along_size, y, depth, lits[0], f"{name}_h"),
+                self._box(x, depth, y, along_size, lits[1], f"{name}_v")]
+
+    def _interior_back(self, hv: HeaterVars) -> None:
+        """Спиной к внутренней стене: за корпусом по всей его ширине одна соседняя комната (СНиП 41-01-2003, п. 6.6.8)."""
+        m, h = self.m, hv.heater
+        rv = self.rooms[h.room]
+        along_size = h.size[0]
+        gaps = (0, STRIP) if h.floor in self.strip else (0,)
+        by_side = defaultdict(list)
+        for q in self.b.floor_rooms(h.floor):
+            if q.id == h.room:
+                continue
+            qv = self.rooms[q.id]
+            for gap in gaps:
+                for facade in C.FACADES:
+                    lit = m.new_bool_var(f"{h.id}_behind_{q.id}_{facade}{gap}")
+                    by_side[facade].append(lit)
+                    if facade == "north":
+                        m.add(qv.y == rv.y_end + gap).only_enforce_if(lit)
+                    elif facade == "south":
+                        m.add(qv.y_end + gap == rv.y).only_enforce_if(lit)
+                    elif facade == "east":
+                        m.add(qv.x == rv.x_end + gap).only_enforce_if(lit)
+                    else:
+                        m.add(qv.x_end + gap == rv.x).only_enforce_if(lit)
+                    lo, size = (qv.x, qv.w) if facade in HORIZONTAL else (qv.y, qv.h)
+                    m.add(lo <= hv.along).only_enforce_if(lit)
+                    m.add(hv.along + along_size <= lo + size).only_enforce_if(lit)
+        for facade in C.FACADES:
+            m.add(sum(by_side[facade]) == hv.back[facade])
+
+    def _exterior_back(self, hv: HeaterVars, r: Room) -> None:
+        """Спиной к наружной стене: за корпусом снаружи пусто, как за окном."""
+        m, h = self.m, hv.heater
+        rv = self.rooms[h.room]
+        floor = [self.rooms[s.id] for s in self.b.floor_rooms(h.floor)]
+        along_size = h.size[0]
+        for facade, on in hv.back.items():
+            if self.rectangular:
+                m.add(self._face(rv, facade) == self._frame_side(h.floor, facade)).only_enforce_if(on)
+                continue
+            near, far = NEAR_CLEARANCE - C.OPENING_END_GAP, FAR_CLEARANCE - C.OPENING_END_GAP
+            along = m.new_optional_fixed_size_interval_var(hv.along - near, along_size + near + far, on,
+                                                           f"{h.id}_{facade}_along")
+            depth = 1 + STRIP if h.floor in self.strip else 1
+            band = m.new_optional_fixed_size_interval_var(self._band(rv, facade, depth), depth, on,
+                                                          f"{h.id}_{facade}_band")
+            probe = (along, band) if facade in HORIZONTAL else (band, along)
+            m.add_no_overlap_2d([probe[0]] + [s.cell_x for s in floor], [probe[1]] + [s.cell_y for s in floor])
+            m.add_implication(on, self._facade_access(r, facade))
+
+    def _chimney_at(self, hv: HeaterVars, outside: bool) -> tuple:
+        """Левый нижний угол трубы: у стены за спиной отопителя посередине его ширины, внутри корпуса или снаружи стены."""
+        m, h, d = self.m, hv.heater, self.size
+        rv = self.rooms[h.room]
+        along_size, depth = h.size
+        cw, cd = C.CHIMNEY
+        reach = C.EXTERIOR_WALL + cd + GAP_MIN
+        cx, cy = m.new_int_var(-reach, d + reach, f"{h.id}_cx"), m.new_int_var(-reach, d + reach, f"{h.id}_cy")
+        mid = (along_size - cw) // 2
+        wall = C.EXTERIOR_WALL
+        if outside:
+            places = {"north": (hv.x + mid, rv.y + rv.h + wall), "south": (hv.x + mid, rv.y - wall - cd),
+                      "east": (rv.x + rv.w + wall, hv.y + mid), "west": (rv.x - wall - cd, hv.y + mid)}
+        else:
+            places = {"north": (hv.x + mid, hv.y + depth - cd), "south": (hv.x + mid, hv.y),
+                      "east": (hv.x + depth - cd, hv.y + mid), "west": (hv.x, hv.y + mid)}
+        for facade, (px, py) in places.items():
+            m.add(cx == px).only_enforce_if(hv.back[facade])
+            m.add(cy == py).only_enforce_if(hv.back[facade])
+        hv.chimney = (cx, cy)
+        return cx, cy
+
+    def _clear_of_floor(self, hv: HeaterVars, floor: int, present) -> None:
+        """Труба с наружными стенами этажа не пересекается: вне его контура (раздел 7 ТЗ, п. 19)."""
+        cx, cy = hv.chimney
+        cw, cd = C.CHIMNEY
+        grow = C.EXTERIOR_WALL - C.INTERIOR_WALL
+        boxes = self._oriented(hv, cx - grow, cy - grow, cw + 2 * grow + 1, cd + 2 * grow + 1, present)
+        cells = [self.rooms[r.id] for r in self.b.floor_rooms(floor)]
+        self.m.add_no_overlap_2d([b[0] for b in boxes] + [c.cell_x for c in cells],
+                                 [b[1] for b in boxes] + [c.cell_y for c in cells])
+
+    def _chimney_through(self, hv: HeaterVars) -> dict[int, tuple]:
+        """Труба внутри корпуса поднимается на этажи выше: на каждом лежит в одной комнате у её стены.
+
+        Над последним пройденным этажом над трубой этажей нет. Возвращает сплошные прямоугольники трубы
+        по этажам выше этажа отопителя.
+        """
+        m, h = self.m, hv.heater
+        cx, cy = self._chimney_at(hv, outside=False)
+        cw, cd = C.CHIMNEY
+        sx = cd + (cw - cd) * hv.horiz
+        sy = cw + (cd - cw) * hv.horiz
+        out, prev = {}, None
+        for floor in range(h.floor + 1, self.b.floors + 1):
+            t = m.new_bool_var(f"{h.id}_through{floor}")
+            if prev is not None:
+                m.add_implication(t, prev)
+            prev = t
+            hv.through[floor] = t
+            inside = []
+            for q in self.b.floor_rooms(floor):
+                if q.kind == "stair":
+                    continue
+                qv = self.rooms[q.id]
+                lit = m.new_bool_var(f"{h.id}_in_{q.id}")
+                m.add(cx >= qv.x).only_enforce_if(lit)
+                m.add(cy >= qv.y).only_enforce_if(lit)
+                m.add(cx + sx <= qv.x + qv.w).only_enforce_if(lit)
+                m.add(cy + sy <= qv.y + qv.h).only_enforce_if(lit)
+                flush = [m.new_bool_var(f"{h.id}_in_{q.id}_{f}") for f in C.FACADES]
+                m.add(cy + sy == qv.y + qv.h).only_enforce_if(flush[0])
+                m.add(cx + sx == qv.x + qv.w).only_enforce_if(flush[1])
+                m.add(cy == qv.y).only_enforce_if(flush[2])
+                m.add(cx == qv.x).only_enforce_if(flush[3])
+                m.add_bool_or(flush).only_enforce_if(lit)
+                for f in flush:
+                    m.add_implication(f, lit)
+                inside.append(lit)
+            m.add(sum(inside) == t)
+            self._clear_of_floor(hv, floor, 1 - t)
+            self._openings_clear(floor, self._oriented(hv, cx, cy, cw, cd, 1 - t))
+            out[floor] = (self._oriented(hv, cx, cy, cw, cd, t), t)
+        return out
+
+    def _facade_chimney(self, hv: HeaterVars) -> None:
+        """Приставная труба снаружи стены за камином: от земли выше крыши, вне контура всех этажей, не закрывает проёмы."""
+        cx, cy = self._chimney_at(hv, outside=True)
+        cw, cd = C.CHIMNEY
+        chimney = self._oriented(hv, cx, cy, cw, cd)
+        for floor in range(1, self.b.floors + 1):
+            self._clear_of_floor(hv, floor, 1)
+            self._openings_clear(floor, chimney)
+
+    def _openings_clear(self, floor: int, chimney: list[tuple]) -> None:
+        """Труба снаружи этажа не закрывает его проёмы: полоса 100 мм за наружной стеной вдоль проёма свободна."""
+        m, wall = self.m, C.EXTERIOR_WALL
+        for r in self.b.floor_rooms(floor):
+            rv = self.rooms[r.id]
+            outside = []
+            for ov in (o for o in self.openings if o.opening.room == r.id):
+                w = ov.opening.width
+                for facade, on in ov.on_facade.items():
+                    at = {"north": self._top(rv) + wall, "south": rv.y - wall - 1,
+                          "east": self._right(rv) + wall, "west": rv.x - wall - 1}[facade]
+                    box = (ov.start, w, at, 1) if facade in HORIZONTAL else (at, 1, ov.start, w)
+                    outside.append(self._box(box[0], box[1], box[2], box[3], on, f"{r.id}_{facade}_out"))
+            if outside:
+                boxes = outside + chimney
+                m.add_no_overlap_2d([b[0] for b in boxes], [b[1] for b in boxes])
+
+    def _under_window(self, hv: HeaterVars) -> None:
+        """Конвектор под одним из окон своей комнаты, у каждого окна не больше одного конвектора (СП 402, п. Е.3)."""
+        m, h = self.m, hv.heater
+        wins = [(k, ov) for k, ov in enumerate(self.openings) if ov.opening.room == h.room and ov.opening.kind == "window"]
+        for k, ov in wins:
+            lit = m.new_bool_var(f"{h.id}_under{k}")
+            hv.windows[k] = lit
+            for facade, on in ov.on_facade.items():
+                m.add_bool_or([~lit, ~on, hv.back[facade]])
+            m.add(hv.along >= ov.start).only_enforce_if(lit)
+            m.add(hv.along + h.size[0] <= ov.start + ov.opening.width).only_enforce_if(lit)
+        m.add_exactly_one(hv.windows.values())
+        for k, _ in wins:
+            others = [o.windows[k] for o in self.heaters.values() if k in o.windows]
+            if others:
+                m.add_at_most_one(others + [hv.windows[k]])
+
+    def _add_outlets(self) -> None:
+        """Коаксиальные выходы газовых приборов: середина корпуса на стене за спиной (СП 402, пп. Г.17, Е.8).
+
+        До окон и дверей того же этажа на том же фасаде по горизонтали не меньше OUTLET_TO_OPENING, кроме окна
+        над конвектором; между выходами — OUTLET_GAP, между выходами двух конвекторов — CONVECTOR_OUTLET_GAP.
+        """
+        m = self.m
+        gas = [hv for hv in self.heaters.values() if hv.heater.gas]
+        for hv in gas:
+            h = hv.heater
+            at = hv.along + h.size[0] // 2
+            for k, ov in enumerate(self.openings):
+                if self.b.room(ov.opening.room).floor != h.floor:
+                    continue
+                left = m.new_bool_var(f"{h.id}_left{k}")
+                own = [~hv.windows[k]] if k in hv.windows else []
+                for facade, on in ov.on_facade.items():
+                    lits = [hv.back[facade], on] + own
+                    m.add(ov.start + ov.opening.width + C.OUTLET_TO_OPENING <= at).only_enforce_if(lits + [left])
+                    m.add(at + 1 + C.OUTLET_TO_OPENING <= ov.start).only_enforce_if(lits + [~left])
+        for i, a in enumerate(gas):
+            for b in gas[i + 1:]:
+                if a.heater.floor != b.heater.floor:
+                    continue
+                both = a.heater.kind == b.heater.kind == "gas_convector"
+                gap = C.CONVECTOR_OUTLET_GAP if both else C.OUTLET_GAP
+                at_a, at_b = a.along + a.heater.size[0] // 2, b.along + b.heater.size[0] // 2
+                left = m.new_bool_var(f"{a.heater.id}_{b.heater.id}_left")
+                for facade in C.FACADES:
+                    lits = [a.back[facade], b.back[facade]]
+                    m.add(at_a + 1 + gap <= at_b).only_enforce_if(lits + [left])
+                    m.add(at_b + 1 + gap <= at_a).only_enforce_if(lits + [~left])
+
+    def _window_bands(self, floor: int) -> list[tuple]:
+        """Полоса 100 мм внутри комнаты вдоль каждого окна этажа: в неё не встают отопитель и труба."""
+        out = []
+        for ov in self.openings:
+            r = self.b.room(ov.opening.room)
+            if r.floor != floor or ov.opening.kind != "window":
+                continue
+            rv, w = self.rooms[r.id], ov.opening.width
+            for facade, on in ov.on_facade.items():
+                at = {"north": self._top(rv) - 1, "south": rv.y, "east": self._right(rv) - 1, "west": rv.x}[facade]
+                box = (ov.start, w, at, 1) if facade in HORIZONTAL else (at, 1, ov.start, w)
+                out.append(self._box(box[0], box[1], box[2], box[3], on, f"{r.id}_{facade}_win"))
+        return out
+
+    def _door_zones(self, floor: int) -> list[list]:
+        """Зоны дверей этажа: каждая — варианты прямоугольника, из которых есть ровно один.
+
+        Внутренняя дверь — ширина двери на DOOR_ZONE по обе стороны стены, её положение выбирает модель.
+        Наружная дверь — вглубь комнаты на ширину двери, а у двери наружу — на DOOR_APPROACH.
+        """
+        m, d = self.m, self.size
+        zones = []
+        for a, c in self.b.doors:
+            if self.b.room(a).floor != floor:
+                continue
+            ra, rc = self.rooms[a], self.rooms[c]
+            at = m.new_int_var(0, d, f"door_{a}_{c}_at")
+            across = m.new_int_var(0, d, f"door_{a}_{c}_across")
+            self.door_at[(a, c)] = at
+            present = defaultdict(list)
+            for lit, (side, gap) in self.door_rel[(a, c)]:
+                vertical = side in "we"
+                lo, hi = (ra, rc) if side in "ws" else (rc, ra)
+                face = lo.x + lo.w if vertical else lo.y + lo.h
+                m.add(across == face - C.DOOR_ZONE).only_enforce_if(lit)
+                for rv in (ra, rc):
+                    start, size = (rv.y, rv.h) if vertical else (rv.x, rv.w)
+                    m.add(at >= start + C.OPENING_END_GAP).only_enforce_if(lit)
+                    m.add(at + C.INTERIOR_DOOR + C.OPENING_END_GAP <= start + size).only_enforce_if(lit)
+                present[(vertical, gap)].append(lit)
+            zone = []
+            for (vertical, gap), lits in present.items():
+                on = m.new_bool_var(f"door_{a}_{c}_{vertical}{gap}")
+                m.add(on == sum(lits))
+                thick = 2 * C.DOOR_ZONE + C.INTERIOR_WALL + gap
+                box = (across, thick, at, C.INTERIOR_DOOR) if vertical else (at, C.INTERIOR_DOOR, across, thick)
+                zone.append(self._box(*box[:2], *box[2:], on, f"door_{a}_{c}_{vertical}{gap}"))
+            zones.append(zone)
+        for ov in self.openings:
+            r = self.b.room(ov.opening.room)
+            if r.floor != floor or ov.opening.kind != "door":
+                continue
+            rv, w = self.rooms[r.id], ov.opening.width
+            deep = C.DOOR_APPROACH if self.b.gas_room(r.id) else w
+            zone = []
+            for facade, on in ov.on_facade.items():
+                at = {"north": self._top(rv) - deep, "south": rv.y, "east": self._right(rv) - deep, "west": rv.x}[facade]
+                box = (ov.start, w, at, deep) if facade in HORIZONTAL else (at, deep, ov.start, w)
+                zone.append(self._box(*box[:2], *box[2:], on, f"{r.id}_{facade}_door"))
+            zones.append(zone)
+        return zones
+
     def _add_objectives(self) -> None:
         m, d = self.m, self.size
         grow = 2 * C.EXTERIOR_WALL - C.INTERIOR_WALL
@@ -681,7 +1083,17 @@ class PlanModel:
         strips = {floor: [(xs[i], ys[j], xs[i + 1], ys[j + 1]) for i in range(self.n) for j in range(self.n)
                           if val(grid[i][j])]
                   for floor, grid in self.strip.items()}
-        return Plan(rooms, placements, strips)
+        plan = Plan(rooms, placements, strips)
+        cw, cd = C.CHIMNEY
+        for hid, hv in self.heaters.items():
+            back = next(f for f, lit in hv.back.items() if val(lit))
+            plan.heaters[hid] = (val(hv.x), val(hv.y), back)
+            if hv.chimney:
+                size = (cw, cd) if back in HORIZONTAL else (cd, cw)
+                top = max([f for f, t in hv.through.items() if val(t)], default=hv.heater.floor)
+                plan.chimneys[hid] = (val(hv.chimney[0]), val(hv.chimney[1]), *size, top)
+        plan.doors = {pair: val(at) for pair, at in self.door_at.items()}
+        return plan
 
 
 def solve(building: Building, time_limit: float = C.TIME_LIMIT_S) -> Plan:
@@ -711,6 +1123,10 @@ def solve(building: Building, time_limit: float = C.TIME_LIMIT_S) -> Plan:
         raise Timeout(f"за {time_limit:g} с допустимый план не найден{hint}")
     reason = ("ограничения планировки невыполнимы: допустимого плана нет ни с прямоугольными этажами, "
               f"ни с выемками контура (сетка до {GRID_MAX} линий, выемки не уже {GAP_MIN * C.UNIT_MM} мм)")
+    if building.heaters and deadline - time.monotonic() > 0.5:
+        _, relaxed = PlanModel(building, True, heaters=False).find_feasible(deadline - time.monotonic())
+        if relaxed is not None:
+            raise Infeasible("отопители, трубы и выходы не помещаются по правилам раздела 7: без них план есть")
     if supported and deadline - time.monotonic() > 0.5:
         _, relaxed = PlanModel(building, True, support=False).find_feasible(deadline - time.monotonic())
         if relaxed is not None:

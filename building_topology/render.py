@@ -9,7 +9,7 @@ import cairocffi
 import cairosvg
 
 from . import constants as C
-from .layout import HORIZONTAL, OUTWARD, Grid, Layout, Opening, area_flag, swing_side
+from .layout import HORIZONTAL, OUTWARD, Grid, Layout, Opening, area_flag, swing_face
 
 PX = C.PX_PER_M * C.UNIT_MM / 1000
 FONT = "DejaVu Sans"
@@ -20,6 +20,10 @@ WALL_LINE, THIN_LINE = 1.4, 0.8
 BEAM_LINE, BEAM_DASH = 2.0, "8 5"
 FILL = {None: "#fff", "larger": "#c6ebc6", "smaller": "#f6c4c4"}
 FILL_NAME = {"larger": "Зелёная", "smaller": "Красная"}
+HEATER_FILL = "#d9d9d9"
+HEATER_ABBR = {"fireplace": "К", "solid_boiler": "ТК", "gas_boiler": "ГК", "gas_convector": "ГКв"}
+HEATER_NAME = {"fireplace": "камин", "solid_boiler": "твердотопливный котёл", "gas_boiler": "газовый котёл",
+               "gas_convector": "газовый конвектор"}
 
 _measure = cairocffi.Context(cairocffi.ImageSurface(cairocffi.FORMAT_ARGB32, 1, 1))
 _measure.select_font_face(FONT)
@@ -57,10 +61,19 @@ def _merge(edges: set[tuple[str, int, int]]) -> list[tuple[str, int, int, int]]:
 class Sheet:
     def __init__(self, layout: Layout):
         self.layout = layout
-        self.ox, self.oy = layout.origin
-        first = layout.floor_rooms(1)
-        self.width_u = max(r.x + r.w for r in first) + C.EXTERIOR_WALL - self.ox
-        self.height_u = max(r.y + r.h for r in first) + C.EXTERIOR_WALL - self.oy
+        x0, y0 = layout.origin
+        x1, y1 = layout.extent
+        for o in layout.openings:
+            if o.kind == "door" and not o.swing:
+                wall = layout.walls[o.wall]
+                reach = (wall.across[1] if OUTWARD[wall.facade] > 0 else wall.across[0]) + OUTWARD[wall.facade] * o.width
+                if wall.facade in HORIZONTAL:
+                    y0, y1 = min(y0, reach), max(y1, reach)
+                else:
+                    x0, x1 = min(x0, reach), max(x1, reach)
+        self.ox, self.oy = x0, y0
+        self.width_u = x1 - self.ox
+        self.height_u = y1 - self.oy
         self.width = max(round(self.width_u * PX) + 2 * MARGIN, 5 * C.PX_PER_M + 2 * MARGIN + 120)
 
     def x(self, u: float) -> float:
@@ -116,6 +129,7 @@ class Sheet:
                 marks.extend(self._stair(r))
         body.append(f'<g stroke="#000" stroke-width="{THIN_LINE}" fill="none">{"".join(marks)}</g>')
 
+        body.extend(self._heaters(floor, legend))
         for r in rooms:
             body.extend(self._label(r, legend))
         legend.extend(self._area_notes(rooms))
@@ -152,8 +166,7 @@ class Sheet:
             mid = (c0 + c1) / 2
             out.append(self._line(f, o.lo, mid, o.hi, mid))
             return out
-        side = swing_side(self.layout.rooms, self.layout.walls, o)
-        face = self.layout.rooms[o.swing].face(side)
+        side, face = swing_face(self.layout.rooms, self.layout.walls, o)
         inward = -OUTWARD[side]
         hinge = self.point(f, o.lo, face)
         leaf = self.point(f, o.lo, face + inward * o.width)
@@ -231,6 +244,51 @@ class Sheet:
                 out.append(f"{FILL_NAME[flag]} заливка — {room.name}: {area_text(r.w * r.h)} при цели "
                            f"{area_text(room.target)}, {sign}{pct}%")
         return out
+
+    def _box(self, rect, fill: str) -> str:
+        x0, y0, x1, y1 = rect
+        return (f'<rect x="{self.x(x0)}" y="{self.y(y1)}" width="{(x1 - x0) * PX:g}" height="{(y1 - y0) * PX:g}" '
+                f'fill="{fill}"/>')
+
+    def _heaters(self, floor: int, legend: list[str]) -> list[str]:
+        """Отопители с сокращением, дымовые трубы прямоугольником с крестом, кружок коаксиального выхода."""
+        layout = self.layout
+        heaters = [h for h in layout.heaters if h.floor == floor]
+        home = {h.id: h.floor for h in layout.heaters}
+        chimneys = [c for c in layout.chimneys if c.outside or home[c.heater] <= floor]
+        out = []
+        for h in heaters:
+            out.append(self._box(h.rect, HEATER_FILL))
+            x0, y0, x1, y1 = h.rect
+            own = next((c for c in chimneys if c.heater == h.id and not c.outside), None)
+            if own:
+                x0, y0, x1, y1 = {"north": (x0, y0, x1, own.y), "south": (x0, own.y + own.h, x1, y1),
+                                  "east": (x0, y0, own.x, y1), "west": (own.x + own.w, y0, x1, y1)}[h.back]
+            text = HEATER_ABBR[h.kind]
+            size = min(10, (x1 - x0) * PX / (0.7 * len(text) + 0.4), (y1 - y0) * PX * 0.7)
+            out.append(f'<text x="{self.x((x0 + x1) / 2)}" y="{self.y((y0 + y1) / 2) + 0.35 * size:.2f}" '
+                       f'font-size="{size:.1f}" text-anchor="middle" stroke="none" fill="#000">{escape(text)}</text>')
+            if h.gas:
+                face = layout.rooms[h.room].face(h.back)
+                at, step = h.outlet + 0.5, OUTWARD[h.back]
+                tip = self.point(h.back, at, face + step * (C.EXTERIOR_WALL + 2))
+                out.append(self._line(h.back, at, face, at, face + step * (C.EXTERIOR_WALL + 2)))
+                out.append(f'<circle cx="{tip[0]}" cy="{tip[1]}" r="3" fill="#fff"/>')
+        for c in chimneys:
+            x0, y0, x1, y1 = c.rect
+            out.append(self._box(c.rect, "#fff"))
+            out.append(f'<line x1="{self.x(x0)}" y1="{self.y(y0)}" x2="{self.x(x1)}" y2="{self.y(y1)}"/>')
+            out.append(f'<line x1="{self.x(x0)}" y1="{self.y(y1)}" x2="{self.x(x1)}" y2="{self.y(y0)}"/>')
+        if not out:
+            return []
+        kinds = sorted({h.kind for h in heaters}, key=C.HEATER_KINDS.index)
+        if kinds:
+            legend.append("Отопители: " + ", ".join(f"{HEATER_ABBR[k]} — {HEATER_NAME[k]}" for k in kinds))
+        if chimneys:
+            legend.append("Прямоугольник с крестом — дымовая труба")
+        if any(h.gas for h in heaters):
+            legend.append("Кружок за наружной стеной — коаксиальный выход газового прибора")
+        return [f'<g stroke="#000" stroke-width="{THIN_LINE}">{"".join(out)}</g>']
 
     def _structure(self, floor: int, legend: list[str]) -> list[str]:
         """Балки в перекрытии над этажом — пунктир по оси стены выше, колонны — залитые квадраты."""

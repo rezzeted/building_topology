@@ -16,6 +16,7 @@
       "id": "hall",
       "name": "Прихожая",
       "kind": "corridor",
+      "use": "hall",
       "floor": 1,
       "area_m2": 7.5,
       "windows": [],
@@ -27,6 +28,7 @@
       "id": "wc",
       "name": "Санузел",
       "kind": "room",
+      "use": "bath",
       "floor": 1,
       "area_m2": 5.0,
       "windows": [
@@ -37,6 +39,7 @@
       "id": "pantry",
       "name": "Кладовая",
       "kind": "room",
+      "use": "storage",
       "floor": 1,
       "area_m2": 5.0,
       "windows": []
@@ -45,6 +48,7 @@
       "id": "living",
       "name": "Гостиная",
       "kind": "room",
+      "use": "living",
       "floor": 1,
       "area_m2": 22.0,
       "windows": [
@@ -59,6 +63,7 @@
       "id": "kitchen",
       "name": "Кухня",
       "kind": "room",
+      "use": "kitchen",
       "floor": 1,
       "area_m2": 19.0,
       "windows": [
@@ -78,6 +83,7 @@
       "id": "bath2",
       "name": "Ванная",
       "kind": "room",
+      "use": "bath",
       "floor": 2,
       "area_m2": 6.0,
       "windows": [
@@ -88,6 +94,7 @@
       "id": "bed2",
       "name": "Спальня 2",
       "kind": "room",
+      "use": "bedroom",
       "floor": 2,
       "area_m2": 11.5,
       "windows": [
@@ -99,6 +106,7 @@
       "id": "landing2",
       "name": "Холл",
       "kind": "corridor",
+      "use": "hall",
       "floor": 2,
       "area_m2": 8.5,
       "windows": []
@@ -107,6 +115,7 @@
       "id": "bed1",
       "name": "Спальня 1",
       "kind": "room",
+      "use": "bedroom",
       "floor": 2,
       "area_m2": 13.5,
       "windows": [
@@ -118,6 +127,7 @@
       "id": "dressing",
       "name": "Гардеробная",
       "kind": "room",
+      "use": "storage",
       "floor": 2,
       "area_m2": 6.5,
       "windows": []
@@ -126,6 +136,7 @@
       "id": "bed3",
       "name": "Спальня 3",
       "kind": "room",
+      "use": "bedroom",
       "floor": 2,
       "area_m2": 12.0,
       "windows": [
@@ -145,6 +156,7 @@
       "id": "landing3",
       "name": "Холл",
       "kind": "corridor",
+      "use": "hall",
       "floor": 3,
       "area_m2": 4.5,
       "windows": []
@@ -153,6 +165,7 @@
       "id": "office",
       "name": "Кабинет",
       "kind": "room",
+      "use": "office",
       "floor": 3,
       "area_m2": 13.0,
       "windows": [
@@ -163,6 +176,7 @@
       "id": "master",
       "name": "Главная спальня",
       "kind": "room",
+      "use": "bedroom",
       "floor": 3,
       "area_m2": 17.5,
       "windows": [
@@ -173,6 +187,7 @@
       "id": "bath3",
       "name": "Ванная при спальне",
       "kind": "room",
+      "use": "bath",
       "floor": 3,
       "area_m2": 7.0,
       "windows": [

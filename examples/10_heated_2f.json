@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "floors": 2,
+  "house_area_m2": 150.0,
+  "rooms": [
+    {
+      "id": "stair1",
+      "name": "Лестница",
+      "kind": "stair",
+      "floor": 1,
+      "area_m2": 7.2,
+      "windows": []
+    },
+    {
+      "id": "bath1",
+      "name": "Санузел",
+      "kind": "room",
+      "use": "bath",
+      "floor": 1,
+      "area_m2": 5.0,
+      "windows": [
+        { "count": 1, "width_mm": 600, "facade": "west" }
+      ]
+    },
+    {
+      "id": "hall",
+      "name": "Прихожая",
+      "kind": "corridor",
+      "use": "hall",
+      "floor": 1,
+      "area_m2": 6.5,
+      "windows": [],
+      "exterior_doors": [
+        { "facade": "west", "entrance": true }
+      ]
+    },
+    {
+      "id": "kitchen",
+      "name": "Кухня",
+      "kind": "room",
+      "use": "kitchen",
+      "floor": 1,
+      "area_m2": 10.0,
+      "windows": [
+        { "count": 1, "facade": "west" },
+        { "count": 1, "facade": "south" }
+      ]
+    },
+    {
+      "id": "boiler",
+      "name": "Котельная",
+      "kind": "room",
+      "use": "boiler_room",
+      "floor": 1,
+      "area_m2": 6.0,
+      "windows": [
+        { "count": 1, "width_mm": 600 }
+      ]
+    },
+    {
+      "id": "living",
+      "name": "Гостиная",
+      "kind": "room",
+      "use": "living",
+      "floor": 1,
+      "area_m2": 28.5,
+      "windows": [
+        { "count": 2, "facade": "east" },
+        { "count": 1, "facade": "north" }
+      ],
+      "exterior_doors": [
+        { "facade": "east", "width_mm": 900, "entrance": false }
+      ]
+    },
+    {
+      "id": "dining",
+      "name": "Столовая",
+      "kind": "room",
+      "use": "dining",
+      "floor": 1,
+      "area_m2": 15.0,
+      "windows": [
+        { "count": 1, "facade": "east" },
+        { "count": 1, "facade": "south" }
+      ]
+    },
+    {
+      "id": "stair2",
+      "name": "Лестница",
+      "kind": "stair",
+      "floor": 2,
+      "area_m2": 7.2,
+      "windows": []
+    },
+    {
+      "id": "bath2",
+      "name": "Ванная",
+      "kind": "room",
+      "use": "bath",
+      "floor": 2,
+      "area_m2": 6.0,
+      "windows": [
+        { "count": 1, "width_mm": 600, "facade": "west" }
+      ]
+    },
+    {
+      "id": "bed3",
+      "name": "Спальня 3",
+      "kind": "room",
+      "use": "bedroom",
+      "floor": 2,
+      "area_m2": 16.0,
+      "windows": [
+        { "count": 2, "facade": "west" },
+        { "count": 1, "facade": "south" }
+      ]
+    },
+    {
+      "id": "landing",
+      "name": "Холл",
+      "kind": "corridor",
+      "use": "hall",
+      "floor": 2,
+      "area_m2": 8.5,
+      "windows": []
+    },
+    {
+      "id": "bed1",
+      "name": "Спальня 1",
+      "kind": "room",
+      "use": "bedroom",
+      "floor": 2,
+      "area_m2": 17.5,
+      "windows": [
+        { "count": 2, "facade": "east" },
+        { "count": 1, "facade": "north" }
+      ]
+    },
+    {
+      "id": "bed2",
+      "name": "Спальня 2",
+      "kind": "room",
+      "use": "bedroom",
+      "floor": 2,
+      "area_m2": 17.0,
+      "windows": [
+        { "count": 1, "facade": "east" },
+        { "count": 1, "facade": "south" }
+      ]
+    }
+  ],
+  "doors": [
+    { "a": "hall", "b": "bath1" },
+    { "a": "hall", "b": "living" },
+    { "a": "hall", "b": "kitchen" },
+    { "a": "hall", "b": "boiler" },
+    { "a": "kitchen", "b": "dining" },
+    { "a": "living", "b": "dining" },
+    { "a": "stair1", "b": "living" },
+    { "a": "landing", "b": "stair2" },
+    { "a": "landing", "b": "bath2" },
+    { "a": "landing", "b": "bed3" },
+    { "a": "landing", "b": "bed1" },
+    { "a": "landing", "b": "bed2" }
+  ],
+  "stairs": [
+    {
+      "id": "stair_main",
+      "from_floor": 1,
+      "to_floor": 2,
+      "width_mm": 3000,
+      "depth_mm": 2400,
+      "rooms": ["stair1", "stair2"]
+    }
+  ],
+  "heaters": [
+    { "id": "fireplace", "kind": "fireplace", "room": "living" },
+    { "id": "stove", "kind": "solid_boiler", "room": "boiler" }
+  ]
+}

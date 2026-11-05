@@ -7,6 +7,7 @@
       "id": "bath",
       "name": "Ванная",
       "kind": "room",
+      "use": "bath",
       "floor": 1,
       "area_m2": 7.5,
       "windows": [
@@ -17,6 +18,7 @@
       "id": "hall",
       "name": "Прихожая",
       "kind": "corridor",
+      "use": "hall",
       "floor": 1,
       "area_m2": 6.5,
       "windows": [],
@@ -28,6 +30,7 @@
       "id": "kitchen",
       "name": "Кухня-столовая",
       "kind": "room",
+      "use": "kitchen",
       "floor": 1,
       "area_m2": 18.5,
       "windows": [
@@ -38,6 +41,7 @@
       "id": "wc",
       "name": "Туалет",
       "kind": "room",
+      "use": "wc",
       "floor": 1,
       "area_m2": 3.5,
       "windows": []
@@ -46,6 +50,7 @@
       "id": "corridor",
       "name": "Коридор",
       "kind": "corridor",
+      "use": "hall",
       "floor": 1,
       "area_m2": 6.0,
       "windows": []
@@ -54,6 +59,7 @@
       "id": "pantry",
       "name": "Кладовая",
       "kind": "room",
+      "use": "storage",
       "floor": 1,
       "area_m2": 3.0,
       "windows": []
@@ -62,6 +68,7 @@
       "id": "living",
       "name": "Гостиная",
       "kind": "room",
+      "use": "living",
       "floor": 1,
       "area_m2": 17.5,
       "windows": [
@@ -73,6 +80,7 @@
       "id": "bed1",
       "name": "Спальня 1",
       "kind": "room",
+      "use": "bedroom",
       "floor": 1,
       "area_m2": 13.5,
       "windows": [
@@ -84,6 +92,7 @@
       "id": "bed2",
       "name": "Спальня 2",
       "kind": "room",
+      "use": "bedroom",
       "floor": 1,
       "area_m2": 11.5,
       "windows": [

@@ -7,7 +7,7 @@ from collections import deque
 import numpy as np
 
 from . import constants as C
-from .layout import HORIZONTAL, Grid, Layout, Wall
+from .layout import HORIZONTAL, OUTWARD, Grid, Layout, Wall, opening_conflicts, own_window
 from .problem import rectangles
 
 
@@ -74,6 +74,7 @@ def check(layout: Layout) -> list[str]:
     errors += _check_walls(layout, grids)
     errors += _check_support(layout, grids)
     errors += _check_openings(layout)
+    errors += _check_heaters(layout, grids)
     return errors
 
 
@@ -219,6 +220,134 @@ def _check_openings(layout: Layout) -> list[str]:
         needed = sum(g.count for g in r.windows) + len(r.exterior_doors)
         if len(placed) != needed:
             errors.append(f"{r.id}: наружных проёмов {len(placed)}, по заданию {needed}")
+    return errors
+
+
+def _inside(inner, outer) -> bool:
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
+
+
+def _interior(r) -> tuple[int, int, int, int]:
+    return r.x, r.y, r.x + r.w, r.y + r.h
+
+
+def _flush(rect, outer) -> bool:
+    return rect[0] == outer[0] or rect[1] == outer[1] or rect[2] == outer[2] or rect[3] == outer[3]
+
+
+def _check_heaters(layout: Layout, grids: dict[int, Grid]) -> list[str]:
+    """Отопители, трубы и выходы (раздел 7 ТЗ, п. 16–25)."""
+    b = layout.building
+    errors = []
+    rooms = layout.rooms
+    if sorted(h.id for h in layout.heaters) != sorted(h.id for h in b.heaters):
+        errors.append("отопители плана не совпадают с отопителями входа")
+    specs = {h.id: h for h in b.heaters}
+    floors = range(1, b.floors + 1)
+
+    for h in layout.heaters:
+        spec, r = specs[h.id], rooms[h.room]
+        name = f"отопитель {h.id}"
+        along, depth = spec.size
+        if (h.kind, h.room, h.floor, h.flue) != (spec.kind, spec.room, spec.floor, spec.flue):
+            errors.append(f"{name}: вид, комната или труба не как во входе")
+        if (h.w, h.h) != ((along, depth) if h.back in HORIZONTAL else (depth, along)):
+            errors.append(f"{name}: размер {h.w}×{h.h} не по таблице")
+        if not _inside(h.rect, _interior(r)):
+            errors.append(f"{name}: выходит из комнаты {r.id}")
+        if {"north": h.rect[3], "south": h.rect[1], "east": h.rect[2], "west": h.rect[0]}[h.back] != r.face(h.back):
+            errors.append(f"{name}: не стоит спиной к стене {h.back}")
+        lo, hi = h.span
+        run = next((u for u in layout.runs[r.id] if u.facade == h.back and u.lo <= lo and hi <= u.hi), None)
+        need = ("shared", "bearing") if h.flue == "chimney" else ("exterior",)
+        if run is None or run.kind not in need:
+            wall = "внутренняя стена с одной комнатой" if h.flue == "chimney" else "наружная стена"
+            errors.append(f"{name}: за спиной на всю ширину не {wall}")
+        elif run.kind == "exterior" and (lo < run.lo + run.near - C.OPENING_END_GAP
+                                         or hi > run.hi - run.far + C.OPENING_END_GAP):
+            errors.append(f"{name}: заходит за наружную стену соседней комнаты во внутреннем углу фасада")
+        front = h.front
+        if front:
+            if not _inside(front, _interior(r)):
+                errors.append(f"{name}: зона перед ним выходит из комнаты")
+            for rect, other in layout.solids(h.floor):
+                if other != h.id and _overlap(front, rect):
+                    errors.append(f"{name}: в зону перед ним заходит {other}")
+        if h.kind == "gas_convector":
+            r_lo, r_hi = r.along(h.back)
+            if lo - r_lo < C.CONVECTOR_SIDE_GAP or r_hi - hi < C.CONVECTOR_SIDE_GAP:
+                errors.append(f"{name}: ближе {C.CONVECTOR_SIDE_GAP * C.UNIT_MM} мм к боковой стене")
+            if not any(own_window(h, o, layout.walls) for o in layout.openings):
+                errors.append(f"{name}: не под окном своей комнаты")
+    for o in layout.openings:
+        under = [h.id for h in layout.heaters if own_window(h, o, layout.walls)]
+        if len(under) > 1:
+            errors.append(f"окно {o.rooms[0]}: под ним больше одного конвектора")
+    for r in b.rooms:
+        convectors = sum(h.kind == "gas_convector" for h in layout.heaters if h.room == r.id)
+        area = rooms[r.id].w * rooms[r.id].h
+        if convectors and area < C.CONVECTOR_ROOM_MIN:
+            errors.append(f"{r.id}: с конвектором площадь меньше {C.CONVECTOR_ROOM_MIN * C.CELL_M2:g} м²")
+        if convectors == 1 and area >= C.CONVECTOR_PAIR_AREA:
+            errors.append(f"{r.id}: при площади от {C.CONVECTOR_PAIR_AREA * C.CELL_M2:g} м² один конвектор")
+
+    for f in floors:
+        solids = layout.solids(f)
+        for i, (a, ida) in enumerate(solids):
+            for c, idc in solids[i + 1:]:
+                if _overlap(a, c):
+                    errors.append(f"этаж {f}: {ida} и {idc} пересекаются")
+
+    heaters = {h.id: h for h in layout.heaters}
+    for c in layout.chimneys:
+        h = heaters[c.heater]
+        name = f"труба {c.heater}"
+        cw, cd = C.CHIMNEY
+        if (c.w, c.h) != ((cw, cd) if h.back in HORIZONTAL else (cd, cw)):
+            errors.append(f"{name}: размер {c.w}×{c.h} не по таблице")
+        lo, hi = (c.x, c.x + c.w) if h.back in HORIZONTAL else (c.y, c.y + c.h)
+        if lo - h.span[0] != (C.HEATER_SIZE[h.kind][0] - cw) // 2 or hi > h.span[1]:
+            errors.append(f"{name}: не посередине отопителя")
+        face = rooms[h.room].face(h.back)
+        if c.outside:
+            near = {"north": c.y, "south": c.y + c.h, "east": c.x, "west": c.x + c.w}[h.back]
+            outer = face + OUTWARD[h.back] * C.EXTERIOR_WALL
+            if near != outer:
+                errors.append(f"{name}: не примыкает снаружи к стене за отопителем")
+            if c.floors != tuple(floors):
+                errors.append(f"{name}: приставная труба не на всех этажах")
+            outside = floors
+        else:
+            if not _inside(c.rect, h.rect) or not _flush(c.rect, h.rect):
+                errors.append(f"{name}: на этаже отопителя не в его корпусе у стены")
+            if c.floors != tuple(range(h.floor, c.floors[-1] + 1)):
+                errors.append(f"{name}: этажи трубы идут не подряд от этажа отопителя")
+            for f in c.floors[1:]:
+                hosts = [r for r in layout.floor_rooms(f) if b.room(r.id).kind != "stair"
+                         and _inside(c.rect, _interior(r)) and _flush(c.rect, _interior(r))]
+                if len(hosts) != 1:
+                    errors.append(f"{name}: на этаже {f} не стоит у стены одной комнаты")
+            outside = range(c.floors[-1] + 1, b.floors + 1)
+        for f in outside:
+            grid = grids[f]
+            if grid.footprint[grid.slice(*c.rect)].any():
+                errors.append(f"{name}: на этаже {f} пересекает контур этажа")
+
+    for o in layout.openings:
+        errors += opening_conflicts(layout, o)
+    gas = [h for h in layout.heaters if h.gas]
+    for i, a in enumerate(gas):
+        for c in gas[i + 1:]:
+            if a.floor == c.floor and a.back == c.back:
+                gap = C.CONVECTOR_OUTLET_GAP if a.kind == c.kind == "gas_convector" else C.OUTLET_GAP
+                if abs(a.outlet - c.outlet) < gap + 1:
+                    errors.append(f"выходы {a.id} и {c.id}: ближе {gap * C.UNIT_MM} мм")
+    for o in layout.openings:
+        if o.kind != "door":
+            continue
+        gas_rooms = [rid for rid in o.rooms if b.gas_room(rid)]
+        if gas_rooms and o.swing in gas_rooms:
+            errors.append(f"дверь {'–'.join(o.rooms)}: открывается внутрь комнаты с газовым прибором")
     return errors
 
 

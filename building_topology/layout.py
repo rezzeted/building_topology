@@ -114,6 +114,69 @@ class Column:
     cell: tuple[int, int]
 
 
+@dataclass(frozen=True)
+class HeaterBox:
+    """Корпус отопителя в комнате; back — сторона стены за его спиной."""
+    id: str
+    kind: str
+    floor: int
+    room: str
+    x: int
+    y: int
+    w: int
+    h: int
+    back: str
+    flue: str
+
+    @property
+    def rect(self) -> tuple[int, int, int, int]:
+        return self.x, self.y, self.x + self.w, self.y + self.h
+
+    @property
+    def span(self) -> tuple[int, int]:
+        """Отрезок вдоль стены за спиной."""
+        return (self.x, self.x + self.w) if self.back in HORIZONTAL else (self.y, self.y + self.h)
+
+    @property
+    def gas(self) -> bool:
+        return self.kind in C.GAS_KINDS
+
+    @property
+    def outlet(self) -> int:
+        """Клетка коаксиального выхода вдоль стены: середина корпуса."""
+        return self.span[0] + C.HEATER_SIZE[self.kind][0] // 2
+
+    @property
+    def front(self) -> tuple[int, int, int, int] | None:
+        """Свободная зона перед отопителем во всю его ширину."""
+        depth = C.FRONT_ZONE.get(self.kind, 0)
+        if not depth:
+            return None
+        x0, y0, x1, y1 = self.rect
+        return {"north": (x0, y0 - depth, x1, y0), "south": (x0, y1, x1, y1 + depth),
+                "east": (x0 - depth, y0, x0, y1), "west": (x1, y0, x1 + depth, y1)}[self.back]
+
+
+@dataclass(frozen=True)
+class Chimney:
+    """Дымовая труба отопителя heater. Внутренняя проходит этажи floors внутри дома, приставная стоит снаружи."""
+    heater: str
+    x: int
+    y: int
+    w: int
+    h: int
+    floors: tuple[int, ...]
+    outside: bool
+
+    @property
+    def rect(self) -> tuple[int, int, int, int]:
+        return self.x, self.y, self.x + self.w, self.y + self.h
+
+    def outdoor(self, floor: int) -> bool:
+        """На этаже floor труба стоит снаружи дома: приставная или вышедшая из дома ниже."""
+        return self.outside or floor > self.floors[-1]
+
+
 @dataclass
 class Layout:
     building: Building
@@ -125,21 +188,42 @@ class Layout:
     beams: list[Beam] = field(default_factory=list)
     columns: list[Column] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    heaters: list[HeaterBox] = field(default_factory=list)
+    chimneys: list[Chimney] = field(default_factory=list)
 
     def floor_rooms(self, floor: int) -> list[Rect]:
         return [r for r in self.rooms.values() if r.floor == floor]
 
+    def solids(self, floor: int, convectors: bool = True) -> list[tuple[tuple[int, int, int, int], str]]:
+        """Корпуса отопителей и трубы внутри этажа: (прямоугольник, идентификатор отопителя).
+
+        На этаже отопителя внутренняя труба лежит в его корпусе и отдельно не входит.
+        """
+        out = [(h.rect, h.id) for h in self.heaters if h.floor == floor and (convectors or h.kind != "gas_convector")]
+        home = {h.id: h.floor for h in self.heaters}
+        out += [(c.rect, c.heater) for c in self.chimneys
+                if not c.outside and floor in c.floors and floor != home[c.heater]]
+        return out
+
     @property
     def origin(self) -> tuple[int, int]:
-        """Минимальные наружные грани дома в шагах сетки."""
-        xs = [r.x for r in self.rooms.values()]
-        ys = [r.y for r in self.rooms.values()]
-        return min(xs) - C.EXTERIOR_WALL, min(ys) - C.EXTERIOR_WALL
+        """Минимальные наружные грани дома с приставными трубами в шагах сетки."""
+        xs = [r.x - C.EXTERIOR_WALL for r in self.rooms.values()] + [c.x for c in self.chimneys if c.outside]
+        ys = [r.y - C.EXTERIOR_WALL for r in self.rooms.values()] + [c.y for c in self.chimneys if c.outside]
+        return min(xs), min(ys)
+
+    @property
+    def extent(self) -> tuple[int, int]:
+        """Максимальные наружные грани первого этажа и приставных труб."""
+        first = self.floor_rooms(1)
+        xs = [r.x + r.w + C.EXTERIOR_WALL for r in first] + [c.x + c.w for c in self.chimneys if c.outside]
+        ys = [r.y + r.h + C.EXTERIOR_WALL for r in first] + [c.y + c.h for c in self.chimneys if c.outside]
+        return max(xs), max(ys)
 
     def grids(self) -> dict[int, Grid]:
         """Растры всех этажей в общей рамке с полем PAD вокруг дома."""
-        xs = [v for g in self.rooms.values() for v in (g.x, g.x + g.w)]
-        ys = [v for g in self.rooms.values() for v in (g.y, g.y + g.h)]
+        xs = [v for g in self.rooms.values() for v in (g.x, g.x + g.w)] + [v for c in self.chimneys for v in (c.x, c.x + c.w)]
+        ys = [v for g in self.rooms.values() for v in (g.y, g.y + g.h)] + [v for c in self.chimneys for v in (c.y, c.y + c.h)]
         ox, oy = min(xs) - PAD, min(ys) - PAD
         nx, ny = max(xs) + PAD - ox, max(ys) + PAD - oy
         return {f: Grid(self, f, ox, oy, nx, ny) for f in range(1, self.building.floors + 1)}
@@ -273,7 +357,9 @@ def build(building: Building, plan: Plan) -> Layout:
                 across = tuple(sorted((face, face + OUTWARD[run.facade] * C.INTERIOR_WALL)))
                 walls.append(Wall(room.floor, "interior", run.facade, across, run.lo, run.hi, (rid,)))
 
-    openings: list[Opening] = []
+    layout = Layout(building, rooms, runs, walls, [], dict(plan.strips), stats=dict(plan.stats))
+    layout.heaters, layout.chimneys = _heaters(building, plan)
+    openings = layout.openings
     groups: dict[tuple, list] = {}
     for p in plan.placements:
         room = rooms[p.opening.room]
@@ -283,11 +369,21 @@ def build(building: Building, plan: Plan) -> Layout:
     for (rid, facade, run_lo), placed in groups.items():
         run = next(r for r in runs[rid] if r.facade == facade and r.lo == run_lo)
         placed.sort(key=lambda p: p.start)
-        starts = _spread([p.opening.width for p in placed], run.lo + run.near, run.hi - run.far)
         index = wall_of[(rid, facade, run_lo)]
-        for p, lo in zip(placed, starts):
-            o = p.opening
-            openings.append(Opening(rooms[rid].floor, o.kind, o.width, index, lo, (rid,), rid, facade, o.entrance))
+        swing = "" if building.gas_room(rid) else rid
+
+        def make(starts: list[int]) -> list[Opening]:
+            return [Opening(rooms[rid].floor, p.opening.kind, p.opening.width, index, lo, (rid,),
+                            swing if p.opening.kind == "door" else rid, facade, p.opening.entrance)
+                    for p, lo in zip(placed, starts)]
+
+        spread = make(_spread([p.opening.width for p in placed], run.lo + run.near, run.hi - run.far))
+        # Окно над конвектором и окна рядом с отопителями остаются там, где их поставила модель.
+        tied = any(h.kind == "gas_convector" and h.room == rid and h.back == facade
+                   and run.lo <= h.span[0] < run.hi for h in layout.heaters)
+        if tied or any(opening_conflicts(layout, o) for o in spread):
+            spread = make([p.start for p in placed])
+        openings.extend(spread)
 
     clearances = [box for o in openings if o.kind == "door" for box in door_clearance(rooms, walls, o)]
     for a, c in building.doors:
@@ -295,18 +391,95 @@ def build(building: Building, plan: Plan) -> Layout:
         wall = walls[index]
         ra, rc = building.room(a), building.room(c)
         swing = max((ra.target, a), (rc.target, c))[1]
+        if building.gas_room(a) or building.gas_room(c):
+            swing = c if building.gas_room(a) else a
         middle = wall.lo + (wall.hi - wall.lo - C.INTERIOR_DOOR) // 2
         candidates = dict.fromkeys((middle, wall.lo + C.OPENING_END_GAP,
-                                    wall.hi - C.OPENING_END_GAP - C.INTERIOR_DOOR))
-        options = [Opening(rooms[a].floor, "door", C.INTERIOR_DOOR, index, lo, wall.rooms, swing) for lo in candidates]
-        door = min(options, key=lambda o: sum(_common(box, other) for box in door_clearance(rooms, walls, o)
-                                               for other in clearances if other[0] == o.floor))
+                                    wall.hi - C.OPENING_END_GAP - C.INTERIOR_DOOR, plan.doors.get((a, c))))
+        options = [Opening(rooms[a].floor, "door", C.INTERIOR_DOOR, index, lo, wall.rooms, swing)
+                   for lo in candidates if lo is not None]
+        free = [o for o in options if not opening_conflicts(layout, o)] or options
+        door = min(free, key=lambda o: sum(_common(box, other) for box in door_clearance(rooms, walls, o)
+                                            for other in clearances if other[0] == o.floor))
         openings.append(door)
         clearances.extend(door_clearance(rooms, walls, door))
 
-    layout = Layout(building, rooms, runs, walls, openings, dict(plan.strips), stats=dict(plan.stats))
     layout.beams, layout.columns = structure(layout)
     return layout
+
+
+def _heaters(building: Building, plan: Plan) -> tuple[list[HeaterBox], list[Chimney]]:
+    heaters, chimneys = [], []
+    for h in building.heaters:
+        x, y, back = plan.heaters[h.id]
+        along, depth = h.size
+        w, d = (along, depth) if back in HORIZONTAL else (depth, along)
+        heaters.append(HeaterBox(h.id, h.kind, h.floor, h.room, x, y, w, d, back, h.flue))
+        if h.id in plan.chimneys:
+            cx, cy, cw, ch, top = plan.chimneys[h.id]
+            outside = h.flue == "facade"
+            floors = range(1, building.floors + 1) if outside else range(h.floor, top + 1)
+            chimneys.append(Chimney(h.id, cx, cy, cw, ch, tuple(floors), outside))
+    return heaters, chimneys
+
+
+def _band_inside(rooms: dict[str, Rect], walls: list[Wall], o: Opening, depth: int) -> tuple[int, int, int, int]:
+    """Полоса глубиной depth внутри комнаты наружного проёма вдоль него."""
+    wall = walls[o.wall]
+    face = rooms[o.rooms[0]].face(wall.facade)
+    c0, c1 = sorted((face, face - OUTWARD[wall.facade] * depth))
+    return (o.lo, c0, o.hi, c1) if wall.facade in HORIZONTAL else (c0, o.lo, c1, o.hi)
+
+
+def _band_outside(walls: list[Wall], o: Opening) -> tuple[int, int, int, int]:
+    """Полоса 100 мм снаружи наружной стены вдоль проёма."""
+    wall = walls[o.wall]
+    outer = wall.across[1] if OUTWARD[wall.facade] > 0 else wall.across[0]
+    c0, c1 = sorted((outer, outer + OUTWARD[wall.facade]))
+    return (o.lo, c0, o.hi, c1) if wall.facade in HORIZONTAL else (c0, o.lo, c1, o.hi)
+
+
+def door_zone(layout: Layout, o: Opening) -> tuple[int, int, int, int]:
+    """Зона двери, в которую не заходят отопители и трубы (раздел 7 ТЗ, п. 22)."""
+    wall = layout.walls[o.wall]
+    if wall.kind != "exterior":
+        c0, c1 = wall.across[0] - C.DOOR_ZONE, wall.across[1] + C.DOOR_ZONE
+        return (o.lo, c0, o.hi, c1) if wall.facade in HORIZONTAL else (c0, o.lo, c1, o.hi)
+    depth = o.width if o.swing else C.DOOR_APPROACH
+    return _band_inside(layout.rooms, layout.walls, o, depth)
+
+
+def own_window(h: HeaterBox, o: Opening, walls: list[Wall]) -> bool:
+    """Окно над конвектором: на стене за его спиной и над всей его шириной."""
+    return (h.kind == "gas_convector" and o.kind == "window" and o.rooms == (h.room,)
+            and walls[o.wall].facade == h.back and o.lo <= h.span[0] and h.span[1] <= o.hi)
+
+
+def opening_conflicts(layout: Layout, o: Opening) -> list[str]:
+    """Нарушения правил отопителей одним проёмом: зоны, трубы снаружи и выходы газовых приборов."""
+    out = []
+    name = f"{'окно' if o.kind == 'window' else 'дверь'} {'–'.join(o.rooms)}"
+    if o.kind == "window":
+        zone = _band_inside(layout.rooms, layout.walls, o, 1)
+        solids = layout.solids(o.floor, convectors=False)
+    else:
+        zone = door_zone(layout, o)
+        solids = layout.solids(o.floor)
+    for rect, hid in solids:
+        if _common((0, *zone), (0, *rect)):
+            out.append(f"{name}: в зону проёма заходит {hid}")
+    if o.facade is None:
+        return out
+    band = _band_outside(layout.walls, o)
+    for c in layout.chimneys:
+        if c.outdoor(o.floor) and _common((0, *band), (0, *c.rect)):
+            out.append(f"{name}: проём закрыт трубой {c.heater} снаружи")
+    for h in layout.heaters:
+        if h.gas and h.floor == o.floor and h.back == o.facade and not own_window(h, o, layout.walls):
+            at = h.outlet
+            if not (o.hi + C.OUTLET_TO_OPENING <= at or at + 1 + C.OUTLET_TO_OPENING <= o.lo):
+                out.append(f"{name}: ближе {C.OUTLET_TO_OPENING * C.UNIT_MM} мм к выходу {h.id}")
+    return out
 
 
 def _erode(mask: np.ndarray) -> np.ndarray:
@@ -412,10 +585,18 @@ def swing_side(rooms: dict[str, Rect], walls: list[Wall], o: Opening) -> str:
     return wall.facade if o.swing == wall.rooms[0] else OPPOSITE[wall.facade]
 
 
+def swing_face(rooms: dict[str, Rect], walls: list[Wall], o: Opening) -> tuple[str, int]:
+    """Сторона стены и её грань, от которой открывается полотно. Пустой swing — наружная дверь наружу."""
+    side = swing_side(rooms, walls, o)
+    if o.swing:
+        return side, rooms[o.swing].face(side)
+    wall = walls[o.wall]
+    return side, wall.across[1] if OUTWARD[wall.facade] > 0 else wall.across[0]
+
+
 def door_clearance(rooms: dict[str, Rect], walls: list[Wall], o: Opening) -> list[tuple]:
     """Зона открывания полотна и подход к двери с другой стороны: (этаж, x0, y0, x1, y1)."""
-    side = swing_side(rooms, walls, o)
-    face = rooms[o.swing].face(side)
+    side, face = swing_face(rooms, walls, o)
     wall = walls[o.wall]
     zones = [sorted((face, face - OUTWARD[side] * o.width))]
     if wall.kind != "exterior":
@@ -460,6 +641,8 @@ def to_json(layout: Layout) -> dict:
         g = layout.rooms[r.id]
         item = {"id": r.id, "floor": r.floor, "x": _mm(g.x - ox), "y": _mm(g.y - oy), "w": _mm(g.w), "h": _mm(g.h),
                 "area_m2": round(g.w * g.h * C.CELL_M2, 2), "target_area_m2": round(r.target * C.CELL_M2, 2)}
+        if r.kind != "stair":
+            item["use"] = r.use
         flag = area_flag(r, g.w * g.h)
         if flag:
             item["area_flag"] = flag
@@ -485,8 +668,24 @@ def to_json(layout: Layout) -> dict:
     beams = [{"floor": beam.floor, "start": centre(beam.start), "end": centre(beam.end),
               "length_mm": _mm(beam.length)} for beam in layout.beams]
     columns = [{"floor": col.floor, "center": centre(col.cell), "size_mm": _mm(C.COLUMN)} for col in layout.columns]
+
+    def box(x: int, y: int, w: int, h: int) -> dict:
+        return {"x": _mm(x - ox), "y": _mm(y - oy), "w": _mm(w), "h": _mm(h)}
+
+    heaters = []
+    for h in layout.heaters:
+        item = {"id": h.id, "kind": h.kind, "floor": h.floor, "room": h.room, **box(h.x, h.y, h.w, h.h),
+                "back": h.back, "flue": h.flue}
+        if h.gas:
+            face = layout.rooms[h.room].face(h.back) + OUTWARD[h.back] * C.EXTERIOR_WALL
+            along = h.outlet + 0.5
+            at = [along - ox, face - oy] if h.back in HORIZONTAL else [face - ox, along - oy]
+            item["outlet"] = {"facade": h.back, "point": [_mm(v) for v in at]}
+        heaters.append(item)
+    chimneys = [{"heater": c.heater, **box(c.x, c.y, c.w, c.h), "floors": list(c.floors), "outside": c.outside}
+                for c in layout.chimneys]
     return {"version": 1, "floors": b.floors, "rooms": rooms, "walls": walls, "openings": openings,
-            "beams": beams, "columns": columns, "metrics": metrics(layout)}
+            "beams": beams, "columns": columns, "heaters": heaters, "chimneys": chimneys, "metrics": metrics(layout)}
 
 
 def metrics(layout: Layout) -> dict:

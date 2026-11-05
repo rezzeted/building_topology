@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 
 from building_topology import constants as C
@@ -49,6 +50,23 @@ def closet_house() -> dict:
                    "exterior_doors": [{"facade": "south", "entrance": True}]},
                   {"id": "closet", "name": "Кладовая", "kind": "room", "floor": 1, "area_m2": 2.0, "windows": []}],
         "doors": [{"a": "hall", "b": "closet"}],
+    }
+
+
+def heated_house() -> dict:
+    """Один этаж: прихожая, кухня с газовым котлом, гостиная с камином и конвектором под окном."""
+    def room(rid, kind, use, area, **extra):
+        return {"id": rid, "name": rid, "kind": kind, "use": use, "floor": 1, "area_m2": area, "windows": [], **extra}
+
+    return {
+        "version": 1, "floors": 1, "house_area_m2": 34.0,
+        "rooms": [room("hall", "corridor", "hall", 6.0, exterior_doors=[{"facade": "south", "entrance": True}]),
+                  room("kitchen", "room", "kitchen", 10.0, windows=[{"count": 1}]),
+                  room("living", "room", "living", 18.0, windows=[{"count": 2}])],
+        "doors": [{"a": "hall", "b": "kitchen"}, {"a": "hall", "b": "living"}],
+        "heaters": [{"id": "fp", "kind": "fireplace", "room": "living"},
+                    {"id": "gb", "kind": "gas_boiler", "room": "kitchen"},
+                    {"id": "conv", "kind": "gas_convector", "room": "living"}],
     }
 
 
@@ -152,6 +170,52 @@ class SupportTest(unittest.TestCase):
         self.assertIn("в плане есть балки или колонны, а structure.allow_beams не задан", check(layout))
 
 
+class HeaterTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.building = parse(heated_house())
+        cls.plan = solve(cls.building, 20)
+
+    def layout(self) -> Layout:
+        return build(self.building, self.plan)
+
+    def test_placed_and_checked(self):
+        layout = self.layout()
+        self.assertEqual(check(layout), [])
+        heaters = {h.id: h for h in layout.heaters}
+        self.assertEqual(sorted(heaters), ["conv", "fp", "gb"])
+        fp = heaters["fp"]
+        self.assertIn(next(u for u in layout.runs["living"] if u.facade == fp.back and u.lo <= fp.span[0]).kind,
+                      ("shared", "bearing"))
+        self.assertEqual([(c.heater, c.floors, c.outside) for c in layout.chimneys], [("fp", (1,), False)])
+        for o in layout.openings:
+            if o.kind == "door" and o.facade is None:
+                self.assertEqual(o.swing, "hall")
+
+    def test_json_and_drawing(self):
+        layout = self.layout()
+        data = to_json(layout)
+        self.assertEqual({r["id"]: r["use"] for r in data["rooms"]}, {"hall": "hall", "kitchen": "kitchen", "living": "living"})
+        heaters = {h["id"]: h for h in data["heaters"]}
+        self.assertEqual(heaters["gb"]["outlet"]["facade"], heaters["gb"]["back"])
+        self.assertNotIn("outlet", heaters["fp"])
+        self.assertEqual(data["chimneys"][0]["heater"], "fp")
+        svg, _ = render(layout)[1]
+        self.assertIn("Отопители: К — камин, ГК — газовый котёл, ГКв — газовый конвектор", svg)
+        self.assertIn("дымовая труба", svg)
+
+    def test_check_catches_violations(self):
+        layout = self.layout()
+        i, gb = next((i, h) for i, h in enumerate(layout.heaters) if h.id == "gb")
+        dx, dy = {"north": (0, -1), "south": (0, 1), "east": (-1, 0), "west": (1, 0)}[gb.back]
+        layout.heaters[i] = replace(gb, x=gb.x + dx, y=gb.y + dy)
+        self.assertIn("отопитель gb: не стоит спиной к стене " + gb.back, check(layout))
+        layout = self.layout()
+        door = next(o for o in layout.openings if o.kind == "door" and "kitchen" in o.rooms)
+        door.swing = "kitchen"
+        self.assertTrue(any("открывается внутрь комнаты с газовым прибором" in e for e in check(layout)))
+
+
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -207,6 +271,21 @@ class CliTest(unittest.TestCase):
         code, err = run_cli(str(path), "-o", str(self.out), "--time-limit", "10")
         self.assertEqual(code, 3)
         self.assertIn("allow_beams", err)
+        self.assert_no_results()
+
+    def test_heaters_do_not_fit(self):
+        self.stale()
+        data = heated_house()
+        data["rooms"] = data["rooms"][2:]
+        data["rooms"][0]["exterior_doors"] = [{"facade": "south", "entrance": True}]
+        data["doors"] = []
+        data["heaters"] = data["heaters"][:1]
+        data["house_area_m2"] = 18.0
+        path = Path(self.tmp.name) / "alone.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        code, err = run_cli(str(path), "-o", str(self.out), "--time-limit", "10")
+        self.assertEqual(code, 3)
+        self.assertIn("отопители", err)
         self.assert_no_results()
 
     def test_timeout(self):
