@@ -81,8 +81,11 @@ def main(argv: list[str] | None = None) -> int:
             shutil.move(str(path), out / path.name)
 
     m = data["metrics"]
+    beams = f"балки {m['beam_length_m']:.1f} м, колонн {m['columns']}, " if m["beam_length_m"] or m["columns"] else ""
+    off = m["rooms_out_of_tolerance"]
+    off = f"комнат дальше {C.AREA_TOLERANCE_PCT}% от цели {off}, " if off else ""
     print(f"план: этажей {building.floors}, комнат {len(building.rooms)}, "
-          f"отклонение площадей {m['area_deviation_m2']:.2f} м², "
+          f"отклонение площадей {m['area_deviation_m2']:.2f} м², {off}"
           f"контур этажа 1 {m['outline_area_m2']:.2f} м², стены {m['wall_length_m']:.1f} м, "
-          f"{m['seconds']:.1f} с -> {out}")
+          f"{beams}{m['seconds']:.1f} с -> {out}")
     return OK

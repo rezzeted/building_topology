@@ -69,6 +69,9 @@ class Building:
     rooms: list[Room]
     doors: list[tuple[str, str]]
     shafts: list[Shaft]
+    allow_beams: bool = False
+    beam_span: int = C.BEAM_SPAN_DEFAULT
+    room_tolerance: int = C.AREA_TOLERANCE_PCT
 
     def __post_init__(self) -> None:
         self.by_id = {r.id: r for r in self.rooms}
@@ -84,17 +87,17 @@ class Building:
         return next(r for r in self.rooms if any(d.entrance for d in r.exterior_doors))
 
 
-def rectangles(kind: str, target: int) -> list[tuple[int, int]]:
+def rectangles(kind: str, target: int, pct: int = C.AREA_TOLERANCE_PCT) -> list[tuple[int, int]]:
     """Все прямоугольники сетки (w, h), допустимые для комнаты по площади, сторонам и пропорциям."""
-    lo = math.ceil(target * (100 - C.AREA_TOLERANCE_PCT) / 100)
-    hi = target * (100 + C.AREA_TOLERANCE_PCT) // 100
+    lo = math.ceil(target * (100 - pct) / 100)
+    hi = target * (100 + pct) // 100
     side, aspect = C.MIN_SIDE[kind], C.MAX_ASPECT[kind]
     out = []
     for w in range(side, hi // side + 1):
         h_lo = max(side, math.ceil(lo / w), math.ceil(w / aspect))
         h_hi = min(hi // w, w * aspect)
         for h in range(h_lo, h_hi + 1):
-            if C.within_tolerance(w * h, target):
+            if C.within_tolerance(w * h, target, pct):
                 out.append((w, h))
     return out
 
@@ -177,7 +180,8 @@ def _list(value, where: str) -> list:
 
 
 def _parse_schema(data) -> Building:
-    top = _fields(data, "вход", {"version", "floors", "house_area_m2", "rooms"}, {"doors", "stairs"})
+    top = _fields(data, "вход", {"version", "floors", "house_area_m2", "rooms"},
+                  {"doors", "stairs", "structure", "room_area_tolerance_pct"})
     if _int(top["version"], "version") != 1:
         raise InputError(f"version: поддерживается только 1, получено {top['version']}")
     floors = _int(top["floors"], "floors", 1, C.MAX_FLOORS)
@@ -267,7 +271,16 @@ def _parse_schema(data) -> Building:
         members = _list(s["rooms"], f"{where}.rooms")
         shafts.append(Shaft(sid, lo, hi, width, depth, members))
 
-    return Building(floors, house_area, rooms, doors, shafts)
+    structure = _fields(top.get("structure", {}), "structure", set(), {"allow_beams", "max_beam_span_mm"})
+    beams = structure.get("allow_beams", False)
+    if not isinstance(beams, bool):
+        raise InputError("structure.allow_beams: ожидается true или false")
+    span = _length(structure.get("max_beam_span_mm", C.BEAM_SPAN_DEFAULT * C.UNIT_MM),
+                   "structure.max_beam_span_mm", C.BEAM_SPAN_MIN * C.UNIT_MM)
+    tolerance = _int(top.get("room_area_tolerance_pct", C.AREA_TOLERANCE_PCT), "room_area_tolerance_pct",
+                     1, C.ROOM_TOLERANCE_MAX_PCT)
+
+    return Building(floors, house_area, rooms, doors, shafts, beams, span, tolerance)
 
 
 def _check_semantics(b: Building) -> None:
@@ -333,10 +346,10 @@ def _check_semantics(b: Building) -> None:
     # 5.3, 5.9
     for r in b.rooms:
         if r.kind != "stair":
-            r.shapes = rectangles(r.kind, r.target)
+            r.shapes = rectangles(r.kind, r.target, b.room_tolerance)
             if not r.shapes:
                 raise InputError(
-                    f"комната {r.id}: нет прямоугольника площадью {r.target * C.CELL_M2:.2f} м² ±{C.AREA_TOLERANCE_PCT}% "
+                    f"комната {r.id}: нет прямоугольника площадью {r.target * C.CELL_M2:.2f} м² ±{b.room_tolerance}% "
                     f"со стороной не меньше {C.MIN_SIDE[r.kind] * C.UNIT_MM} мм и пропорцией не больше "
                     f"{C.MAX_ASPECT[r.kind]}")
         perimeter = max(2 * (w + h) for w, h in r.shapes)

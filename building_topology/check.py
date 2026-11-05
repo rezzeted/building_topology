@@ -7,31 +7,8 @@ from collections import deque
 import numpy as np
 
 from . import constants as C
-from .layout import HORIZONTAL, Layout, Wall
+from .layout import HORIZONTAL, Grid, Layout, Wall
 from .problem import rectangles
-
-PAD = C.EXTERIOR_WALL + 2
-
-
-class Grid:
-    """Клетки одного этажа в сдвинутых координатах: индекс [x, y]."""
-
-    def __init__(self, layout: Layout, floor: int, ox: int, oy: int, nx: int, ny: int):
-        self.ox, self.oy = ox, oy
-        self.cells = np.zeros((nx, ny), dtype=np.int16)
-        self.inner = np.zeros((nx, ny), dtype=bool)
-        for r in layout.floor_rooms(floor):
-            x0, y0, x1, y1 = r.cell
-            self.cells[self.slice(x0, y0, x1, y1)] += 1
-            self.inner[self.slice(r.x, r.y, r.x + r.w, r.y + r.h)] = True
-        occupied = self.cells > 0
-        self.footprint = np.zeros_like(occupied)
-        for dx in range(-C.EXTERIOR_WALL, C.EXTERIOR_WALL):
-            for dy in range(-C.EXTERIOR_WALL, C.EXTERIOR_WALL):
-                self.footprint |= np.roll(np.roll(occupied, dx, 0), dy, 1)
-
-    def slice(self, x0: int, y0: int, x1: int, y1: int):
-        return slice(x0 - self.ox, x1 - self.ox), slice(y0 - self.oy, y1 - self.oy)
 
 
 def _connected(mask: np.ndarray, start: tuple[int, int]) -> bool:
@@ -69,7 +46,7 @@ def check(layout: Layout) -> list[str]:
             shaft = next(s for s in b.shafts if s.id == r.shaft)
             if (g.w, g.h) != (shaft.width, shaft.depth):
                 errors.append(f"{r.id}: размер {g.w}×{g.h} не равен шахте {shaft.width}×{shaft.depth}")
-        elif (g.w, g.h) not in rectangles(r.kind, r.target):
+        elif (g.w, g.h) not in rectangles(r.kind, r.target, b.room_tolerance):
             errors.append(f"{r.id}: прямоугольник {g.w}×{g.h} нарушает площадь, сторону или пропорции")
     for s in b.shafts:
         rects = {(rooms[rid].x, rooms[rid].y, rooms[rid].w, rooms[rid].h) for rid in s.rooms}
@@ -79,15 +56,13 @@ def check(layout: Layout) -> list[str]:
     if not C.within_tolerance(total, b.house_area):
         errors.append(f"сумма площадей {total * C.CELL_M2:.2f} м² вне допуска дома")
 
-    xs = [v for g in rooms.values() for v in (g.x, g.x + g.w)]
-    ys = [v for g in rooms.values() for v in (g.y, g.y + g.h)]
-    ox, oy = min(xs) - PAD, min(ys) - PAD
-    nx, ny = max(xs) + PAD - ox, max(ys) + PAD - oy
-    grids = {f: Grid(layout, f, ox, oy, nx, ny) for f in range(1, b.floors + 1)}
+    grids = layout.grids()
     for f, grid in grids.items():
         if (grid.cells > 1).any():
             errors.append(f"этаж {f}: комнаты со стенами перекрываются")
-        occupied = grid.cells > 0
+        if (grid.strip & (grid.cells > 0)).any():
+            errors.append(f"этаж {f}: несущая стена заходит в ячейку комнаты")
+        occupied = (grid.cells > 0) | grid.strip
         first = tuple(np.argwhere(occupied)[0])
         if not _connected(occupied, first):
             errors.append(f"этаж {f}: этаж распадается на части")
@@ -97,6 +72,7 @@ def check(layout: Layout) -> list[str]:
             errors.append(f"этаж {f}: контур выходит за контур этажа {f - 1}")
 
     errors += _check_walls(layout, grids)
+    errors += _check_support(layout, grids)
     errors += _check_openings(layout)
     return errors
 
@@ -112,13 +88,19 @@ def _check_walls(layout: Layout, grids: dict[int, Grid]) -> list[str]:
                 errors.append(f"стена {k}: наружная стена заходит в комнату")
             room = rooms[wall.rooms[0]]
             band = room.band(wall.facade)
-            strip = (wall.lo, band, wall.hi, band + 1) if wall.facade in HORIZONTAL else (band, wall.lo, band + 1, wall.hi)
-            if (grid.cells[grid.slice(*strip)] > 0).any():
+            beyond = (wall.lo, band, wall.hi, band + 1) if wall.facade in HORIZONTAL else (band, wall.lo, band + 1, wall.hi)
+            if (grid.cells[grid.slice(*beyond)] > 0).any() or grid.strip[grid.slice(*beyond)].any():
                 errors.append(f"стена {k}: участок {room.id} {wall.facade} не внешний")
         elif len(wall.rooms) == 2:
             a, c = (rooms[rid] for rid in wall.rooms)
-            if c.face(_opposite(wall.facade)) - a.face(wall.facade) != C.INTERIOR_WALL:
-                errors.append(f"стена {k}: между {a.id} и {c.id} зазор не {C.INTERIOR_WALL * C.UNIT_MM} мм")
+            gap = C.INTERIOR_WALL if wall.kind == "interior" else C.BEARING_WALL
+            if c.face(_opposite(wall.facade)) - a.face(wall.facade) != gap:
+                errors.append(f"стена {k}: между {a.id} и {c.id} зазор не {gap * C.UNIT_MM} мм")
+            if wall.kind == "bearing":
+                x0, y0, x1, y1 = wall_rect(wall)
+                beyond_fringe = (x0, y0 + 1, x1, y1) if wall.facade in HORIZONTAL else (x0 + 1, y0, x1, y1)
+                if not grid.strip[grid.slice(*beyond_fringe)].all():
+                    errors.append(f"стена {k}: несущая стена {a.id}–{c.id} не заполнена полосой")
             lo = max(a.along(wall.facade)[0], c.along(wall.facade)[0])
             hi = min(a.along(wall.facade)[1], c.along(wall.facade)[1])
             if (lo, hi) != (wall.lo, wall.hi) or hi <= lo:
@@ -127,6 +109,65 @@ def _check_walls(layout: Layout, grids: dict[int, Grid]) -> list[str]:
         for v in exterior[i + 1:]:
             if w.floor == v.floor and v.facade == _opposite(w.facade) and _overlap(wall_rect(w), wall_rect(v)):
                 errors.append(f"этаж {w.floor}: наружные стены {w.rooms[0]} и {v.rooms[0]} сходятся в узкой выемке")
+    return errors
+
+
+def _check_support(layout: Layout, grids: dict[int, Grid]) -> list[str]:
+    """Наружные и несущие стены верхних этажей стоят на стенах, балках или колоннах (раздел 7.13).
+
+    Позиция стены опёрта, если стена этажа ниже лежит под средним шагом её толщины и ещё под одним.
+    Иначе позицию несёт балка, если балки разрешены: её ось проходит по среднему шагу стены.
+    """
+    b = layout.building
+    errors = []
+    strict = not b.allow_beams
+    if strict and (layout.beams or layout.columns):
+        errors.append("в плане есть балки или колонны, а structure.allow_beams не задан")
+    columns = {(c.floor, c.cell) for c in layout.columns}
+
+    def on_beam(floor: int, cell: tuple[int, int]) -> bool:
+        for beam in layout.beams:
+            if beam.floor != floor:
+                continue
+            (x0, y0), (x1, y1) = beam.start, beam.end
+            if min(x0, x1) <= cell[0] <= max(x0, x1) and min(y0, y1) <= cell[1] <= max(y0, y1):
+                return True
+        return False
+
+    for k, wall in enumerate(layout.walls):
+        if wall.floor == 1 or wall.kind == "interior":
+            continue
+        below = grids[wall.floor - 1]
+        c0 = wall.across[0]
+        hanging = 0
+        for t in range(wall.lo, wall.hi):
+            units = [(t, c) if wall.facade in HORIZONTAL else (c, t) for c in range(c0, c0 + C.EXTERIOR_WALL)]
+            solid = [bool(below.solid[below.index(u)]) for u in units]
+            if solid[1] and sum(solid) >= 2:
+                continue
+            if strict or wall.kind == "bearing" or not on_beam(wall.floor - 1, units[1]):
+                hanging += 1
+        if hanging:
+            errors.append(f"стена {k} ({wall.kind}, этаж {wall.floor}): {hanging * C.UNIT_MM} мм без опоры")
+
+    for beam in layout.beams:
+        (x0, y0), (x1, y1) = beam.start, beam.end
+        if x0 != x1 and y0 != y1:
+            errors.append(f"балка {beam.start}–{beam.end}: не прямая")
+        if beam.length > b.beam_span:
+            errors.append(f"балка {beam.start}–{beam.end}: пролёт {beam.length * C.UNIT_MM} мм длиннее допустимого")
+        grid = grids[beam.floor]
+        for end in (beam.start, beam.end):
+            if not grid.solid[grid.index(end)] and (beam.floor, end) not in columns:
+                errors.append(f"балка {beam.start}–{beam.end}: конец {end} без опоры")
+    for col in layout.columns:
+        grid = grids[col.floor]
+        if not grid.footprint[grid.index(col.cell)]:
+            errors.append(f"колонна {col.cell} на этаже {col.floor}: вне контура этажа")
+        if col.floor > 1:
+            below = grids[col.floor - 1]
+            if not below.solid[below.index(col.cell)] and (col.floor - 1, col.cell) not in columns:
+                errors.append(f"колонна {col.cell} на этаже {col.floor}: под ней нет стены или колонны")
     return errors
 
 
@@ -140,7 +181,7 @@ def _check_openings(layout: Layout) -> list[str]:
         if o.lo < wall.lo + C.OPENING_END_GAP or o.hi > wall.hi - C.OPENING_END_GAP:
             errors.append(f"проём {o.kind} {'–'.join(o.rooms)}: ближе {C.UNIT_MM} мм к концу участка")
         if o.facade is None:
-            if wall.kind != "interior" or wall.hi - wall.lo < C.INTERIOR_DOOR + 2 * C.OPENING_END_GAP:
+            if wall.kind == "exterior" or wall.hi - wall.lo < C.INTERIOR_DOOR + 2 * C.OPENING_END_GAP:
                 errors.append(f"дверь {'–'.join(o.rooms)}: не на общем участке нужной длины")
             continue
         if wall.kind != "exterior" or wall.rooms != o.rooms or wall.facade != o.facade:
@@ -155,7 +196,7 @@ def _check_openings(layout: Layout) -> list[str]:
         for p, q in zip(items, items[1:]):
             if q.lo - p.hi < C.OPENING_GAP:
                 errors.append(f"стена {k}: простенок между проёмами меньше {C.UNIT_MM} мм")
-        if layout.walls[k].kind == "interior" and len(items) > 1:
+        if layout.walls[k].kind != "exterior" and len(items) > 1:
             errors.append(f"стена {k}: больше одной двери на общем участке")
 
     doors = {frozenset(o.rooms) for o in layout.openings if o.kind == "door" and o.facade is None}

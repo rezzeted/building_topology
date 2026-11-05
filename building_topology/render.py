@@ -9,8 +9,7 @@ import cairocffi
 import cairosvg
 
 from . import constants as C
-from .check import Grid
-from .layout import HORIZONTAL, OUTWARD, Layout, Opening, swing_side
+from .layout import HORIZONTAL, OUTWARD, Grid, Layout, Opening, area_flag, swing_side
 
 PX = C.PX_PER_M * C.UNIT_MM / 1000
 FONT = "DejaVu Sans"
@@ -18,6 +17,9 @@ LABEL_SIZE, LABEL_MIN = 14, 8
 STEP = 2.5
 MARGIN, TOP, BOTTOM = 40, 90, 90
 WALL_LINE, THIN_LINE = 1.4, 0.8
+BEAM_LINE, BEAM_DASH = 2.0, "8 5"
+FILL = {None: "#fff", "larger": "#c6ebc6", "smaller": "#f6c4c4"}
+FILL_NAME = {"larger": "Зелёная", "smaller": "Красная"}
 
 _measure = cairocffi.Context(cairocffi.ImageSurface(cairocffi.FORMAT_ARGB32, 1, 1))
 _measure.select_font_face(FONT)
@@ -100,8 +102,9 @@ class Sheet:
             outer.add(("v", grid.ox + i + 1, grid.oy + j))
 
         for r in rooms:
+            fill = FILL[area_flag(layout.building.room(r.id), r.w * r.h)]
             body.append(f'<rect x="{self.x(r.x)}" y="{self.y(r.y + r.h)}" width="{r.w * PX:g}" '
-                        f'height="{r.h * PX:g}" fill="#fff"/>')
+                        f'height="{r.h * PX:g}" fill="{fill}"/>')
         lines = [self._segment(seg) for seg in _merge((inner | outer) - cuts)]
         body.append(f'<g stroke="#000" stroke-width="{WALL_LINE}" stroke-linecap="square">{"".join(lines)}</g>')
 
@@ -115,15 +118,18 @@ class Sheet:
 
         for r in rooms:
             body.extend(self._label(r, legend))
+        legend.extend(self._area_notes(rooms))
+        body.extend(self._structure(floor, legend))
 
-        height = TOP + round(self.height_u * PX) + BOTTOM + 18 * len(legend)
+        plan_bottom = TOP + round(self.height_u * PX)
+        height = plan_bottom + BOTTOM + 18 * len(legend)
         head = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{self.width}" height="{height}" '
                 f'viewBox="0 0 {self.width} {height}" font-family="{FONT}">',
                 f'<rect width="{self.width}" height="{height}" fill="#fff"/>',
                 f'<text x="{MARGIN}" y="34" font-size="20">Этаж {floor}</text>']
-        tail = self._north() + self._scale(TOP + round(self.height_u * PX) + 40)
+        tail = self._north() + self._scale(plan_bottom + 40)
         for k, line in enumerate(legend):
-            tail.append(f'<text x="{MARGIN}" y="{height - BOTTOM + 70 + 18 * k}" font-size="12">'
+            tail.append(f'<text x="{MARGIN}" y="{plan_bottom + 88 + 18 * k}" font-size="12">'
                         f'{escape(line)}</text>')
         return "\n".join(head + body + tail + ["</svg>"]) + "\n"
 
@@ -211,6 +217,39 @@ class Sheet:
         for k, t in enumerate(lines):
             out.append(f'<text x="{cx}" y="{first + k * step:.2f}" font-size="{size}" '
                        f'text-anchor="middle">{escape(t)}</text>')
+        return out
+
+    def _area_notes(self, rooms) -> list[str]:
+        """Строка легенды на каждую комнату, площадь которой ушла от цели дальше нормального допуска."""
+        out = []
+        for r in rooms:
+            room = self.layout.building.room(r.id)
+            flag = area_flag(room, r.w * r.h)
+            if flag:
+                pct = round(100 * abs(r.w * r.h - room.target) / room.target)
+                sign = "+" if flag == "larger" else "−"
+                out.append(f"{FILL_NAME[flag]} заливка — {room.name}: {area_text(r.w * r.h)} при цели "
+                           f"{area_text(room.target)}, {sign}{pct}%")
+        return out
+
+    def _structure(self, floor: int, legend: list[str]) -> list[str]:
+        """Балки в перекрытии над этажом — пунктир по оси стены выше, колонны — залитые квадраты."""
+        beams = [b for b in self.layout.beams if b.floor == floor]
+        columns = [c for c in self.layout.columns if c.floor == floor]
+        out = []
+        if beams:
+            lines = [f'<line x1="{self.x(b.start[0] + 0.5)}" y1="{self.y(b.start[1] + 0.5)}" '
+                     f'x2="{self.x(b.end[0] + 0.5)}" y2="{self.y(b.end[1] + 0.5)}"/>' for b in beams]
+            out.append(f'<g stroke="#000" stroke-width="{BEAM_LINE}" stroke-dasharray="{BEAM_DASH}">{"".join(lines)}</g>')
+            length = sum(b.length for b in beams) * C.UNIT_MM / 1000
+            legend.append(f"Пунктир — балки в перекрытии под стенами этажа {floor + 1}: {length:.1f} м".replace(".", ","))
+        if columns:
+            half = C.COLUMN / 2
+            for c in columns:
+                cx, cy = c.cell[0] + 0.5, c.cell[1] + 0.5
+                out.append(f'<rect x="{self.x(cx - half)}" y="{self.y(cy + half)}" width="{C.COLUMN * PX:g}" '
+                           f'height="{C.COLUMN * PX:g}" fill="#000"/>')
+            legend.append(f"Чёрный квадрат — колонна {C.COLUMN * C.UNIT_MM}×{C.COLUMN * C.UNIT_MM} мм: {len(columns)} шт.")
         return out
 
     def _north(self) -> list[str]:

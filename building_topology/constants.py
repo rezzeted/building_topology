@@ -5,8 +5,14 @@ CELL_M2 = 0.01
 
 INTERIOR_WALL = 1
 EXTERIOR_WALL = 3
+BEARING_WALL = 3
+
+COLUMN = 3
+BEAM_SPAN_DEFAULT = 60
+BEAM_SPAN_MIN = 10
 
 AREA_TOLERANCE_PCT = 10
+ROOM_TOLERANCE_MAX_PCT = 50
 
 MIN_SIDE = {"room": 16, "corridor": 12}
 MAX_ASPECT = {"room": 3, "corridor": 8}
@@ -33,5 +39,5 @@ FACADES = ("north", "east", "south", "west")
 KINDS = ("room", "corridor", "stair")
 
 
-def within_tolerance(actual: int, target: int) -> bool:
-    return 100 * abs(actual - target) <= AREA_TOLERANCE_PCT * target
+def within_tolerance(actual: int, target: int, pct: int = AREA_TOLERANCE_PCT) -> bool:
+    return 100 * abs(actual - target) <= pct * target

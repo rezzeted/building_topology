@@ -81,6 +81,53 @@ class InvalidInputTest(unittest.TestCase):
         data["house_area_m2"] = sum(r["area_m2"] for r in data["rooms"])
         self.assert_rejected(data, "hall")
 
+    def test_structure_fields(self):
+        data = tz_example()
+        data["structure"] = {"allow_beams": "yes"}
+        self.assert_rejected(data, "allow_beams")
+        data["structure"] = {"max_beam_span_mm": 900}
+        self.assert_rejected(data, "меньше минимума")
+        data["structure"] = {"strict_support": True}
+        self.assert_rejected(data, "неизвестное поле")
+
+    def test_room_tolerance_bounds(self):
+        for value in (0, 51, 12.5, "20"):
+            with self.subTest(value):
+                data = tz_example()
+                data["room_area_tolerance_pct"] = value
+                self.assert_rejected(data, "room_area_tolerance_pct")
+
+
+class StructureTest(unittest.TestCase):
+    def test_defaults(self):
+        b = parse(tz_example())
+        self.assertFalse(b.allow_beams)
+        self.assertEqual(b.beam_span, 60)
+
+    def test_given(self):
+        data = tz_example()
+        data["structure"] = {"allow_beams": True, "max_beam_span_mm": 4500}
+        b = parse(data)
+        self.assertTrue(b.allow_beams)
+        self.assertEqual(b.beam_span, 45)
+
+
+class RoomToleranceTest(unittest.TestCase):
+    def test_default(self):
+        b = parse(tz_example())
+        self.assertEqual(b.room_tolerance, 10)
+        self.assertLessEqual(max(w * h for w, h in b.room("bed").shapes), 1540)
+
+    def test_wider_tolerance_gives_more_shapes(self):
+        data = tz_example()
+        data["room_area_tolerance_pct"] = 25
+        b = parse(data)
+        self.assertEqual(b.room_tolerance, 25)
+        areas = [w * h for w, h in b.room("bed").shapes]
+        self.assertGreater(max(areas), 1540)
+        self.assertLess(min(areas), 1260)
+        self.assertTrue(all(abs(a - 1400) * 4 <= 1400 for a in areas))
+
 
 if __name__ == "__main__":
     unittest.main()

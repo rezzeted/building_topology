@@ -2,6 +2,7 @@
   "version": 1,
   "floors": 3,
   "house_area_m2": 180.0,
+  "room_area_tolerance_pct": 30,
   "rooms": [
     {
       "id": "stair1",
